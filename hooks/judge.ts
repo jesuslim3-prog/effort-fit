@@ -107,6 +107,24 @@ export function signatureOf(tool: string, text: string | undefined): string {
   return first === last ? `${tool}: ${first}` : `${tool}: ${first} … ${last}`
 }
 
+/** A last line that names a non-zero exit code: "exit=127", "Exit code: 2", "exit status 1". */
+const EXIT_LINE = /^(?:exit|exit code|exit status|return code|rc)\s*[:=]?\s*[1-9]\d*$/i
+
+/** Bash's own complaint about a missing command: "/usr/bin/bash: line 1: foo: command not found". */
+const NOT_FOUND_LINE = /^(?:\S*\/)?(?:ba)?sh: (?:line \d+: )?\S+: command not found$/
+
+/**
+ * A Bash failure the result does not flag, because the command went on after
+ * it (`foo; echo "exit=$?"` ends in success): a last line naming a non-zero
+ * exit code, or bash's command-not-found line anywhere.
+ */
+export function isHiddenFailure(text: string | undefined): boolean {
+  const lines = (text ?? '').split(/\r?\n/).map(line => line.trim()).filter(line => line !== '')
+  const last = lines[lines.length - 1] ?? ''
+
+  return EXIT_LINE.test(last) || lines.some(line => NOT_FOUND_LINE.test(line))
+}
+
 export function turnSignal(s: TurnStats): { direction: Direction; reasons: string[] } {
   const up: string[] = []
   if (s.repeated.length > 0) {

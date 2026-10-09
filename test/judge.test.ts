@@ -3,6 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   emptyStats,
   isEnvOn,
+  isHiddenFailure,
   keepsCache,
   notificationTracker,
   parsePrior,
@@ -48,6 +49,16 @@ describe('effort-fit judge', () => {
     expect(keepsCache({ family: 'sonnet', effort: 'xhigh' }, 'claude-sonnet-5', false)).toBe(false)
     expect(keepsCache({ family: 'sonnet', effort: 'high' }, 'claude-opus-5-5', false)).toBe(false)
     expect([undefined, '', '0', 'false', '1'].map(isEnvOn)).toEqual([false, false, false, false, true])
+  })
+
+  test('a Bash failure hidden behind a trailing command counts: a non-zero exit last line, or bash\'s command-not-found line', async () => {
+    expect(isHiddenFailure('/usr/bin/bash: line 1: foo-not-exist: command not found\nexit=127')).toBe(true)
+    expect(isHiddenFailure('bash: foo: command not found\ndone')).toBe(true)
+    expect(isHiddenFailure('built\nExit code: 2')).toBe(true)
+    expect(isHiddenFailure('built\nexit=0')).toBe(false)
+    expect(isHiddenFailure('exit=1\nall good')).toBe(false)
+    expect(isHiddenFailure('the docs say: command not found errors mean a missing PATH entry')).toBe(false)
+    expect(isHiddenFailure(undefined)).toBe(false)
   })
 
   test('usage counts carry the turn totals, nulls when the turn reported none', async () => {

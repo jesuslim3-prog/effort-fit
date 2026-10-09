@@ -11,6 +11,7 @@ import {
   emptyStats,
   familyOf,
   isEnvOn,
+  isHiddenFailure,
   isNotificationPrompt,
   keepsCache,
   notificationTracker,
@@ -227,9 +228,10 @@ export const register: Register = on => {
         s.edits += 1
         loop.isAfterEdit = true
       }
-      if (ran.isError === true) {
+      const text = 'text' in ran ? ran.text : undefined
+      if (ran.isError === true || (e.tool === 'Bash' && isHiddenFailure(text))) {
         s.errors += 1
-        const sig = signatureOf(e.tool, 'text' in ran ? ran.text : undefined)
+        const sig = signatureOf(e.tool, text)
         const earlier = e.agentId === undefined ? mainHistory.flat() : []
         if ([...earlier, ...loop.failures].includes(sig) && !s.repeated.includes(sig)) {
           s.repeated.push(sig)
