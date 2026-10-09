@@ -2,6 +2,12 @@ import type { Direction, Prior } from '../types'
 
 export const LADDER = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
+/**
+ * Model families, least capable first; a suggestion moves one step once the
+ * effort ladder runs out. Fable is the most capable (code.claude.com/docs/en/model-config).
+ */
+export const MODEL_LADDER = ['Haiku', 'Sonnet', 'Opus', 'Fable'] as const
+
 export const EDIT_TOOLS = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit']
 
 /** Calls every loop of a kind makes, which say nothing about the work: a subagent's closing handback. */
@@ -126,6 +132,11 @@ export function turnSignal(s: TurnStats): { direction: Direction; reasons: strin
   return { direction: 'keep', reasons: [] }
 }
 
+/** A streak counts turns at one model·effort: a change starts it over, the advice having been taken. */
+export function sinceChange(streak: Streak, before: string, now: string): Streak {
+  return before === now ? streak : { direction: 'keep', count: 0 }
+}
+
 export function advance(prev: Streak, direction: Direction): Streak {
   return prev.direction === direction
     ? { direction, count: prev.count + 1 }
@@ -154,19 +165,20 @@ export function decide(streak: Streak, prior: Prior | null): Direction {
 
 export function suggest(direction: Direction, model: string, effort: string): string | null {
   const i = (LADDER as readonly string[]).indexOf(effort)
+  const m = MODEL_LADDER.findIndex(family => model.toLowerCase().includes(family.toLowerCase()))
   if (direction === 'up') {
     if (i >= 0 && i < LADDER.length - 1) {
       return `effort ${LADDER[i + 1]}`
     }
 
-    return /opus/i.test(model) ? null : 'Opus 모델'
+    return m >= 0 && m < MODEL_LADDER.length - 1 ? `${MODEL_LADDER[m + 1]} 모델` : null
   }
   if (direction === 'down') {
     if (i > 0) {
       return `effort ${LADDER[i - 1]}`
     }
 
-    return /opus/i.test(model) ? 'Sonnet 모델' : null
+    return m > 0 ? `${MODEL_LADDER[m - 1]} 모델` : null
   }
 
   return null

@@ -16,6 +16,7 @@ import {
   parsePrior,
   shortModel,
   signatureOf,
+  sinceChange,
   suggest,
   turnSignal,
   usageCounts,
@@ -117,6 +118,8 @@ export const register: Register = on => {
   /** Failure signatures of the last FAILURE_WINDOW main turns, oldest first. */
   let mainHistory: string[][] = []
   let streak: Streak = { direction: 'keep', count: 0 }
+  /** The model·effort the streak was counted at. */
+  let streakSetting = ''
   let upHold: UpHold | null = null
   let promptSeq = 0
   let prior: { seq: number; level: Prior } | null = null
@@ -263,10 +266,12 @@ export const register: Register = on => {
     mainHistory = [...mainHistory, failures].slice(-(FAILURE_WINDOW - 1))
 
     const signal = turnSignal(stats)
-    streak = advance(streak, signal.direction)
+    const setting = `${main.model}|${main.effort}`
+    streak = advance(sinceChange(streak, streakSetting, setting), signal.direction)
+    streakSetting = setting
     const turnPrior = prior !== null && prior.seq === promptSeq ? prior.level : null
     const decided = decide(streak, turnPrior)
-    const held = holdUp(decided, upHold, `${main.model}|${main.effort}`)
+    const held = holdUp(decided, upHold, setting)
     upHold = held.hold
     const direction = held.shown
     const before = await read($, view)

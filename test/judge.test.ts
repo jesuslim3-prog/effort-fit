@@ -11,6 +11,7 @@ import {
   parsePrior,
   shortModel,
   signatureOf,
+  sinceChange,
   suggest,
   turnSignal,
   usageCounts,
@@ -33,6 +34,15 @@ describe('effort-fit judge', () => {
     streak = advance(streak, light)
     expect(decide(streak, null)).toBe('down')
     expect(decide(streak, 'heavy')).toBe('keep')
+  })
+
+  test('a change of model or effort starts the light-turn count over, so a taken ▼ is not followed at once by another', async () => {
+    let streak = advance(sinceChange({ direction: 'keep', count: 0 }, '', 'opus|high'), 'down')
+    streak = advance(sinceChange(streak, 'opus|high', 'opus|high'), 'down')
+    expect(decide(streak, 'light')).toBe('down')
+    streak = advance(sinceChange(streak, 'opus|high', 'opus|medium'), 'down')
+    expect(streak.count).toBe(1)
+    expect(decide(streak, 'light')).toBe('keep')
   })
 
   test('a ▲ stays three turns, restarts on a fresh ▲, and ends when model or effort changes', async () => {
@@ -58,6 +68,11 @@ describe('effort-fit judge', () => {
     expect(suggest('up', 'claude-sonnet-5-5', 'max')).toBe('Opus 모델')
     expect(suggest('down', 'claude-opus-5-5', 'medium')).toBe('effort low')
     expect(suggest('down', 'claude-opus-5-5', 'low')).toBe('Sonnet 모델')
+    expect(suggest('up', 'claude-opus-5-5', 'max')).toBe('Fable 모델')
+    expect(suggest('up', 'claude-fable-5-1', 'max')).toBe(null)
+    expect(suggest('down', 'claude-sonnet-5-5', 'low')).toBe('Haiku 모델')
+    expect(suggest('down', 'claude-haiku-5-5', 'low')).toBe(null)
+    expect(suggest('up', 'some-other-model', 'max')).toBe(null)
   })
 
   test('an effort change keeps the cache on 5.5-generation models off third-party providers, a model switch never', async () => {
