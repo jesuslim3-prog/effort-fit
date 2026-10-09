@@ -1,21 +1,40 @@
-import type { Direction, Prior } from '../types'
+import type { Combo, Direction, Family, Prior } from '../types'
 
 export const LADDER = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
+/** Model families, least capable first (code.claude.com/docs/en/model-config: Fable is the most capable). */
+export const FAMILIES = ['haiku', 'sonnet', 'opus', 'fable'] as const
+
+export const LEVEL_NAMES = ['가벼움', '보통', '무거움', '매우 무거움'] as const
+
 /**
- * Model families, least capable first; a suggestion moves one step once the
- * effort ladder runs out. Fable is the most capable (code.claude.com/docs/en/model-config).
+ * The level each model·effort serves, by effort low…max. An assumption to
+ * calibrate against the log, as TARGETS is; the two agree with each other.
  */
-export const MODEL_LADDER = ['Haiku', 'Sonnet', 'Opus', 'Fable'] as const
+const TIER: Record<Family, readonly number[]> = {
+  haiku: [0, 0, 0, 1, 1],
+  sonnet: [0, 1, 1, 1, 2],
+  opus: [1, 1, 2, 2, 3],
+  fable: [2, 2, 3, 3, 3],
+}
+
+/** What each level recommends, then the alternative. */
+export const TARGETS: readonly (readonly [Combo, Combo])[] = [
+  [{ family: 'haiku', effort: 'medium' }, { family: 'sonnet', effort: 'low' }],
+  [{ family: 'sonnet', effort: 'high' }, { family: 'opus', effort: 'medium' }],
+  [{ family: 'opus', effort: 'xhigh' }, { family: 'opus', effort: 'high' }],
+  [{ family: 'fable', effort: 'high' }, { family: 'opus', effort: 'max' }],
+]
+
+/** Main turns the level is read over. */
+export const WINDOW = 5
+/** Turns needed before recommending a lower level. */
+export const DOWN_AFTER = 3
 
 export const EDIT_TOOLS = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit']
 
 /** Calls every loop of a kind makes, which say nothing about the work: a subagent's closing handback. */
 export const IGNORED_TOOLS = ['SubagentHandback']
-
-/** Turns a signal must hold in a row before the recommendation changes. */
-export const UP_AFTER = 1
-export const DOWN_AFTER = 3
 
 export type TurnStats = {
   /** Model requests in the turn. */
@@ -28,29 +47,6 @@ export type TurnStats = {
   repeated: string[]
   /** An edit followed by a failing command. */
   editFailLoops: number
-}
-
-export type Streak = { direction: Direction; count: number }
-
-/** Turns a shown ▲ stays, the turn it appeared on included. */
-export const UP_HOLD = 3
-
-/** A ▲ still being held: turns left after this one, and the model·effort it was raised against. */
-export type UpHold = { left: number; setting: string }
-
-/**
- * Keeps a ▲ on screen for UP_HOLD turns. A fresh ▲ starts the count again;
- * a change of model or effort ends it, the advice having been taken.
- */
-export function holdUp(decided: Direction, hold: UpHold | null, setting: string): { shown: Direction; hold: UpHold | null } {
-  if (decided === 'up') {
-    return { shown: 'up', hold: { left: UP_HOLD - 1, setting } }
-  }
-  if (hold !== null && hold.left > 0 && hold.setting === setting) {
-    return { shown: 'up', hold: { left: hold.left - 1, setting } }
-  }
-
-  return { shown: decided, hold: null }
 }
 
 /**
@@ -132,57 +128,86 @@ export function turnSignal(s: TurnStats): { direction: Direction; reasons: strin
   return { direction: 'keep', reasons: [] }
 }
 
-/** A streak counts turns at one model·effort: a change starts it over, the advice having been taken. */
-export function sinceChange(streak: Streak, before: string, now: string): Streak {
-  return before === now ? streak : { direction: 'keep', count: 0 }
+/** A turn of sizeable work: many model requests or many edits. */
+const isHeavyTurn = (s: TurnStats): boolean => s.steps >= 10 || s.edits >= 3
+
+/** Facts that the work is going badly: a failure seen again, edits that keep failing. */
+const strongEvents = (s: TurnStats): number => s.repeated.length + (s.editFailLoops >= 2 ? 1 : 0)
+
+export type Reading = { level: number; strong: number; reasons: string[] }
+
+/**
+ * The level the last WINDOW main turns ask for. Failures are facts; the
+ * prompt's look (prior) only tips a borderline window.
+ */
+export function readLevel(window: readonly TurnStats[], prior: Prior | null): Reading {
+  const strong = window.reduce((n, s) => n + strongEvents(s), 0)
+  const heavy = window.filter(isHeavyTurn).length
+  const light = window.filter(s => turnSignal(s).direction === 'down').length
+  const reasons: string[] = []
+  if (strong > 0) {
+    reasons.push(`최근 ${window.length}턴에 반복 실패·수정 후 실패 ${strong}회`)
+  }
+  if (heavy > 0) {
+    reasons.push(`큰 작업 턴 ${heavy}회`)
+  }
+  if (strong >= 3) {
+    return { level: 3, strong, reasons }
+  }
+  if (strong >= 1 || heavy >= 2 || (prior === 'heavy' && heavy >= 1)) {
+    return { level: 2, strong, reasons }
+  }
+  const lightNeeded = prior === 'light' ? DOWN_AFTER - 1 : DOWN_AFTER
+  if (prior !== 'heavy' && window.length >= lightNeeded && light === window.length) {
+    return { level: 0, strong, reasons: [`가벼운 턴 ${light}회 연속`] }
+  }
+
+  return { level: 1, strong, reasons: reasons.length > 0 ? reasons : [`최근 ${window.length}턴에 실패 반복·큰 작업 없음`] }
 }
 
-export function advance(prev: Streak, direction: Direction): Streak {
-  return prev.direction === direction
-    ? { direction, count: prev.count + 1 }
-    : { direction, count: 1 }
+export const familyOf = (model: string): Family | null =>
+  FAMILIES.find(family => model.toLowerCase().includes(family)) ?? null
+
+/** The level the session's model·effort serves; null for a model or effort off the table. */
+export function tierOf(model: string, effort: string): number | null {
+  const family = familyOf(model)
+  const i = (LADDER as readonly string[]).indexOf(effort)
+
+  return family === null || i < 0 ? null : (TIER[family][i] ?? null)
 }
 
 /**
- * Whether the streak is long enough to recommend. The prior only shortens or
- * blocks a downgrade: failures are facts, a prompt's look is not.
+ * The level to recommend from where the session sits: straight to the level
+ * read when the evidence is strong, else one step toward it, so one spiky or
+ * quiet stretch does not swing the session across the table. Going down waits
+ * for DOWN_AFTER turns, and for a full window to go more than one step.
  */
-export function decide(streak: Streak, prior: Prior | null): Direction {
-  if (streak.direction === 'up') {
-    return streak.count >= UP_AFTER ? 'up' : 'keep'
+export function targetLevel(current: number, reading: Reading, turns: number): number {
+  const { level, strong } = reading
+  if (level < current && turns < DOWN_AFTER) {
+    return current
   }
-  if (streak.direction === 'down') {
-    if (prior === 'heavy') {
-      return 'keep'
-    }
-    const needed = prior === 'light' ? DOWN_AFTER - 1 : DOWN_AFTER
-
-    return streak.count >= needed ? 'down' : 'keep'
+  if (Math.abs(level - current) < 2) {
+    return level
   }
+  const isSure = level > current ? strong >= 2 : turns >= WINDOW
 
-  return 'keep'
+  return isSure ? level : current + Math.sign(level - current)
 }
 
-export function suggest(direction: Direction, model: string, effort: string): string | null {
-  const i = (LADDER as readonly string[]).indexOf(effort)
-  const m = MODEL_LADDER.findIndex(family => model.toLowerCase().includes(family.toLowerCase()))
-  if (direction === 'up') {
-    if (i >= 0 && i < LADDER.length - 1) {
-      return `effort ${LADDER[i + 1]}`
-    }
-
-    return m >= 0 && m < MODEL_LADDER.length - 1 ? `${MODEL_LADDER[m + 1]} 모델` : null
+/** The recommended combos and the level they serve, or null when the session already sits there. */
+export function recommend(model: string, effort: string, reading: Reading, turns: number) {
+  const current = tierOf(model, effort)
+  if (current === null) {
+    return null
   }
-  if (direction === 'down') {
-    if (i > 0) {
-      return `effort ${LADDER[i - 1]}`
-    }
+  const level = targetLevel(current, reading, turns)
 
-    return m > 0 ? `${MODEL_LADDER[m - 1]} 모델` : null
-  }
-
-  return null
+  return level === current ? null : { level, options: TARGETS[level] ?? [] }
 }
+
+/** "Fable·high". */
+export const comboLabel = (c: Combo): string => `${c.family.charAt(0).toUpperCase()}${c.family.slice(1)}·${c.effort}`
 
 /**
  * Models on which changing effort keeps the prompt cache on Anthropic's own
@@ -195,12 +220,12 @@ export const isEnvOn = (value: string | undefined): boolean =>
   value !== undefined && value !== '' && value !== '0' && value.toLowerCase() !== 'false'
 
 /**
- * Whether taking the suggestion now keeps the prompt cache: only an effort
+ * Whether moving to the combo now keeps the prompt cache: only an effort
  * change, on a model that keeps it, off the providers where it does not.
  * A model switch always starts a fresh cache.
  */
-export function keepsCache(suggestion: string, model: string, isEffortCacheBroken: boolean): boolean {
-  return suggestion.startsWith('effort ') && !isEffortCacheBroken && EFFORT_KEEPS_CACHE.test(model)
+export function keepsCache(combo: Combo, model: string, isEffortCacheBroken: boolean): boolean {
+  return familyOf(model) === combo.family && !isEffortCacheBroken && EFFORT_KEEPS_CACHE.test(model)
 }
 
 type Usage = {

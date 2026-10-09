@@ -1,28 +1,28 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentFit, Direction, FitView, Prior } from '../types'
+import type { AgentFit, Direction, FitOption, FitView, Prior } from '../types'
 import {
   EDIT_TOOLS,
   IGNORED_TOOLS,
-  advance,
-  decide,
+  LEVEL_NAMES,
+  WINDOW,
+  comboLabel,
   emptyStats,
-  holdUp,
+  familyOf,
   isEnvOn,
   isNotificationPrompt,
   keepsCache,
   notificationTracker,
   parsePrior,
+  readLevel,
+  recommend,
   shortModel,
   signatureOf,
-  sinceChange,
-  suggest,
+  tierOf,
   turnSignal,
   usageCounts,
-  type Streak,
   type TurnStats,
-  type UpHold,
 } from './judge'
 
 const OLLAMA_URL = 'http://127.0.0.1:11434/api/generate'
@@ -41,7 +41,7 @@ const FAILURE_WINDOW = 3
 const LOG_LIMIT = 300
 const ARROW: Record<Direction, string> = { keep: '●', up: '▲', down: '▼' }
 
-const view = atom({ plugin: 'effort-fit', key: 'view' } as const, null)
+const view = atom({ plugin: 'effort-fit', key: 'panel' } as const, null)
 const agents = atom({ plugin: 'effort-fit', key: 'agents' } as const, [])
 const isHidden = atom({ plugin: 'effort-fit', key: 'isHidden' } as const, false)
 
@@ -103,24 +103,54 @@ async function isEffortCacheBroken($: EngineInterface): Promise<boolean> {
   return values.some(isEnvOn)
 }
 
+const levelBar = (level: number): string => '■'.repeat(level + 1) + '□'.repeat(3 - level)
+
+/** The session's model·effort against the recommendation: fit, short of the work, or more than it needs. */
+function verdict(v: FitView): string {
+  const tier = tierOf(v.model, v.effort)
+  if (tier === null) {
+    return '표에 없는 조합이라 추천하지 않음'
+  }
+  if (v.target === null) {
+    return '적합, 유지'
+  }
+  const name = LEVEL_NAMES[v.target] ?? ''
+
+  return v.target > tier ? `부족 → ${name}용 조합 권장` : `과함 → ${name}용 조합으로 낮춰도 됨`
+}
+
 function statusText(v: FitView): string {
   const head = `${shortModel(v.model)}·${v.effort}`
-  if (v.direction === 'keep' || v.suggestion === null) {
-    return `${head} ● 유지`
+  const first = v.options[0]
+  if (v.target === null || first === undefined) {
+    return `${head} ● ${verdict(v)} (요구 ${LEVEL_NAMES[v.level] ?? ''})`
   }
+  const arrow = v.target > (tierOf(v.model, v.effort) ?? 0) ? '▲' : '▼'
 
-  return v.direction === 'up' ? `${head} ▲ ${v.suggestion} 권장` : `${head} ▼ ${v.suggestion} 가능`
+  return `${head} ${arrow} ${comboLabel(first)} 권장 (요구 ${LEVEL_NAMES[v.target] ?? ''})`
 }
+
+function costText(o: FitOption, contextTokens: number | null): string {
+  if (o.keepsCache) {
+    return 'effort만 변경 · 캐시 유지'
+  }
+  const kind = o.isModelSwitch ? '모델 전환' : 'effort 변경'
+  const size = contextTokens === null ? '' : `약 ${Math.round(contextTokens / 1000)}k 토큰을 `
+
+  return `${kind} · ${size}캐시 없이 다시 읽음`
+}
+
+/** What a hidden panel waits on: it shows again once the recommendation changes. */
+const recommendationKey = (v: FitView | null): string =>
+  v?.options[0] === undefined ? 'fit' : comboLabel(v.options[0])
 
 export const register: Register = on => {
   const main = newLoop()
   const loops = new Map<string, Loop>()
   /** Failure signatures of the last FAILURE_WINDOW main turns, oldest first. */
   let mainHistory: string[][] = []
-  let streak: Streak = { direction: 'keep', count: 0 }
-  /** The model·effort the streak was counted at. */
-  let streakSetting = ''
-  let upHold: UpHold | null = null
+  /** The last WINDOW judged main turns, oldest first. */
+  let recent: TurnStats[] = []
   let promptSeq = 0
   let prior: { seq: number; level: Prior } | null = null
   const notifications = notificationTracker()
@@ -266,28 +296,28 @@ export const register: Register = on => {
     mainHistory = [...mainHistory, failures].slice(-(FAILURE_WINDOW - 1))
 
     const signal = turnSignal(stats)
-    const setting = `${main.model}|${main.effort}`
-    streak = advance(sinceChange(streak, streakSetting, setting), signal.direction)
-    streakSetting = setting
+    recent = [...recent, stats].slice(-WINDOW)
     const turnPrior = prior !== null && prior.seq === promptSeq ? prior.level : null
-    const decided = decide(streak, turnPrior)
-    const held = holdUp(decided, upHold, setting)
-    upHold = held.hold
-    const direction = held.shown
-    const before = await read($, view)
-    const isHeldOver = direction === 'up' && decided !== 'up' && before !== null
-    const suggestion = isHeldOver ? before.suggestion : suggest(direction, main.model, main.effort)
+    const reading = readLevel(recent, turnPrior)
+    const rec = recommend(main.model, main.effort, reading, recent.length)
+    const isBroken = await isEffortCacheBroken($)
     const next_: FitView = {
       model: main.model,
       effort: main.effort,
-      direction,
-      suggestion,
-      keepsCache: suggestion !== null && keepsCache(suggestion, main.model, await isEffortCacheBroken($)),
-      reasons: direction === 'keep' ? [] : isHeldOver ? before.reasons : signal.reasons,
-      prior: isHeldOver ? before.prior : turnPrior,
+      level: reading.level,
+      target: rec?.level ?? null,
+      options: (rec?.options ?? []).map(combo => ({
+        ...combo,
+        isModelSwitch: familyOf(main.model) !== combo.family,
+        keepsCache: keepsCache(combo, main.model, isBroken),
+      })),
+      reasons: rec !== null && rec.level !== reading.level ? [...reading.reasons, '근거가 약해 한 단계만'] : reading.reasons,
+      prior: turnPrior,
+      contextTokens: (await $.session.usage()).context.tokens ?? null,
     }
+    const before = await read($, view)
     await update($, view, () => next_)
-    if (before?.direction !== direction) {
+    if (recommendationKey(before) !== recommendationKey(next_)) {
       await update($, isHidden, () => false)
     }
     $.ui.status(statusText(next_))
@@ -300,7 +330,9 @@ export const register: Register = on => {
       model: main.model,
       effort: main.effort,
       signal: signal.direction,
-      shown: direction,
+      level: reading.level,
+      target: next_.target,
+      recommended: next_.options[0] === undefined ? null : comboLabel(next_.options[0]),
       prior: turnPrior,
       ...stats,
       repeated: stats.repeated.length,
@@ -315,16 +347,15 @@ export const register: Register = on => {
   on('session.compact', async ($, e, next) => {
     const ran = await next(e)
     const v = await read($, view)
+    const first = v?.options[0]
     const isToasted =
       e.agentId === undefined &&
       e.trigger !== 'precompute' &&
       ran.skip === undefined &&
-      v !== null &&
-      v.direction !== 'keep' &&
-      v.suggestion !== null &&
-      !v.keepsCache
+      first !== undefined &&
+      !first.keepsCache
     if (isToasted) {
-      $.ui.toast(`compaction 직후입니다. 지금 ${v.suggestion}(으)로 바꾸면 캐시 손실 없이 적용됩니다.`)
+      $.ui.toast(`compaction 직후입니다. 지금 ${comboLabel(first)}(으)로 바꾸면 캐시 손실 없이 적용됩니다.`)
     }
     const compactLog = ((await $.store.get('compactLog')) ?? []) as unknown[]
     const compactEntry = {
@@ -333,7 +364,7 @@ export const register: Register = on => {
       trigger: e.trigger,
       agentId: e.agentId ?? null,
       skip: ran.skip ?? null,
-      direction: v?.direction ?? null,
+      recommended: first === undefined ? null : comboLabel(first),
       isToasted,
     }
     await $.store.set('compactLog', [...compactLog, compactEntry].slice(-LOG_LIMIT))
@@ -344,8 +375,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const v = await read($, view)
     const rows = (await read($, agents)).filter(r => r.direction !== 'keep')
-    const hasMain = v !== null && v.direction !== 'keep' && v.suggestion !== null
-    if (e.props.hasSurvey || (await read($, isHidden)) || (!hasMain && rows.length === 0)) {
+    if (e.props.hasSurvey || (await read($, isHidden)) || (v === null && rows.length === 0)) {
       return next(e)
     }
 
@@ -353,17 +383,25 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        {hasMain && v !== null ? (
+        {v !== null ? (
           <Text wrap="wrap">
-            {ARROW[v.direction]} {v.suggestion} {v.direction === 'up' ? '권장' : '가능'}: {v.reasons.join(', ')}
+            요구 수준 {levelBar(v.level)} {LEVEL_NAMES[v.level]} · {v.reasons.join(', ')}
             {v.prior === null ? '' : ` · 분류 ${v.prior}`}
           </Text>
         ) : null}
-        {hasMain && v !== null ? (
+        {v !== null ? (
+          <Text wrap="wrap">
+            지금 {shortModel(v.model)}·{v.effort}: {verdict(v)}
+          </Text>
+        ) : null}
+        {v?.options.map((o, k) => (
+          <Text key={comboLabel(o)} wrap="wrap">
+            {k === 0 ? '추천' : '대안'} {comboLabel(o)} · {costText(o, v.contextTokens)}
+          </Text>
+        ))}
+        {v !== null && v.options.some(o => !o.keepsCache) ? (
           <Text dimColor wrap="wrap">
-            {v.keepsCache
-              ? '이 모델에서는 effort를 바꿔도 프롬프트 캐시가 유지되니 지금 바꿔도 됩니다.'
-              : '적용은 다음 compaction 직후나 새 세션에서 하세요. 대화 중간 전환은 컨텍스트 전체를 캐시 없이 다시 처리합니다.'}
+            캐시가 깨지는 변경은 다음 compaction 직후에 하면 손실이 없습니다.
           </Text>
         ) : null}
         {rows.map(r => (

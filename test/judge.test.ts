@@ -1,86 +1,52 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
-  advance,
-  decide,
   emptyStats,
-  holdUp,
   isEnvOn,
   keepsCache,
   notificationTracker,
   parsePrior,
+  readLevel,
+  recommend,
   shortModel,
   signatureOf,
-  sinceChange,
-  suggest,
-  turnSignal,
+  tierOf,
   usageCounts,
 } from '../hooks/judge'
 
+const failing = { ...emptyStats(), steps: 6, tools: 4, errors: 2, repeated: ['Bash: x'] }
+const light = { ...emptyStats(), steps: 2, tools: 2, readOnly: 2 }
+
 describe('effort-fit judge', () => {
-  test('a repeated failure recommends going up at once', async () => {
-    const signal = turnSignal({ ...emptyStats(), steps: 9, tools: 6, errors: 2, repeated: ['Bash: x'] })
-    expect(signal.direction).toBe('up')
-    expect(decide(advance({ direction: 'keep', count: 0 }, signal.direction), null)).toBe('up')
+  test('a repeated failure reads heavy at once, three strong events very heavy, and Haiku·medium goes straight to Fable·high', async () => {
+    expect(readLevel([failing], null).level).toBe(2)
+    const piling = readLevel([{ ...failing, repeated: ['Bash: x', 'Bash: y'], editFailLoops: 2 }], null)
+    expect(piling.level).toBe(3)
+    expect(recommend('claude-haiku-5-5', 'medium', piling, 1)?.options[0]).toEqual({ family: 'fable', effort: 'high' })
   })
 
-  test('light turns recommend going down only after three in a row, two with a light prior, never with a heavy one', async () => {
-    const light = turnSignal({ ...emptyStats(), steps: 2, tools: 2, readOnly: 2 }).direction
-    expect(light).toBe('down')
-    let streak = advance({ direction: 'keep', count: 0 }, light)
-    streak = advance(streak, light)
-    expect(decide(streak, null)).toBe('keep')
-    expect(decide(streak, 'light')).toBe('down')
-    streak = advance(streak, light)
-    expect(decide(streak, null)).toBe('down')
-    expect(decide(streak, 'heavy')).toBe('keep')
+  test('weak evidence moves one level toward the read; going down waits three turns, and a full window to skip a level', async () => {
+    expect(recommend('claude-haiku-5-5', 'medium', readLevel([failing], null), 1)?.level).toBe(1)
+    expect(recommend('claude-opus-5-5', 'high', readLevel([light, light], null), 2)).toBe(null)
+    expect(recommend('claude-opus-5-5', 'high', readLevel([light, light, light], null), 3)?.level).toBe(1)
+    const five = readLevel([light, light, light, light, light], null)
+    expect(recommend('claude-opus-5-5', 'high', five, 5)?.options[0]).toEqual({ family: 'haiku', effort: 'medium' })
   })
 
-  test('a change of model or effort starts the light-turn count over, so a taken ▼ is not followed at once by another', async () => {
-    let streak = advance(sinceChange({ direction: 'keep', count: 0 }, '', 'opus|high'), 'down')
-    streak = advance(sinceChange(streak, 'opus|high', 'opus|high'), 'down')
-    expect(decide(streak, 'light')).toBe('down')
-    streak = advance(sinceChange(streak, 'opus|high', 'opus|medium'), 'down')
-    expect(streak.count).toBe(1)
-    expect(decide(streak, 'light')).toBe('keep')
-  })
-
-  test('a ▲ stays three turns, restarts on a fresh ▲, and ends when model or effort changes', async () => {
-    let step = holdUp('up', null, 'opus|high')
-    const shown = [step.shown]
-    for (const decided of ['down', 'keep', 'down'] as const) {
-      step = holdUp(decided, step.hold, 'opus|high')
-      shown.push(step.shown)
-    }
-    expect(shown).toEqual(['up', 'up', 'up', 'down'])
-
-    step = holdUp('up', null, 'opus|high')
-    step = holdUp('keep', step.hold, 'opus|high')
-    step = holdUp('up', step.hold, 'opus|high')
-    expect(step.hold?.left).toBe(2)
-
-    step = holdUp('keep', step.hold, 'opus|xhigh')
-    expect(step.shown).toBe('keep')
-  })
-
-  test('suggestions walk the effort ladder, then the model', async () => {
-    expect(suggest('up', 'claude-sonnet-5-5', 'high')).toBe('effort xhigh')
-    expect(suggest('up', 'claude-sonnet-5-5', 'max')).toBe('Opus 모델')
-    expect(suggest('down', 'claude-opus-5-5', 'medium')).toBe('effort low')
-    expect(suggest('down', 'claude-opus-5-5', 'low')).toBe('Sonnet 모델')
-    expect(suggest('up', 'claude-opus-5-5', 'max')).toBe('Fable 모델')
-    expect(suggest('up', 'claude-fable-5-1', 'max')).toBe(null)
-    expect(suggest('down', 'claude-sonnet-5-5', 'low')).toBe('Haiku 모델')
-    expect(suggest('down', 'claude-haiku-5-5', 'low')).toBe(null)
-    expect(suggest('up', 'some-other-model', 'max')).toBe(null)
+  test('a light read needs three light turns, two with a light prior, none with a heavy one; a fitting combo gets nothing', async () => {
+    expect(readLevel([light, light], null).level).toBe(1)
+    expect(readLevel([light, light], 'light').level).toBe(0)
+    expect(readLevel([light, light, light], 'heavy').level).toBe(1)
+    expect(recommend('claude-sonnet-5-5', 'high', readLevel([light], null), 1)).toBe(null)
+    expect(tierOf('some-other-model', 'high')).toBe(null)
   })
 
   test('an effort change keeps the cache on 5.5-generation models off third-party providers, a model switch never', async () => {
-    expect(keepsCache('effort xhigh', 'claude-opus-5-5', false)).toBe(true)
-    expect(keepsCache('effort low', 'claude-fable-5-1', false)).toBe(true)
-    expect(keepsCache('effort xhigh', 'claude-opus-5-5', true)).toBe(false)
-    expect(keepsCache('effort xhigh', 'claude-sonnet-5', false)).toBe(false)
-    expect(keepsCache('Sonnet 모델', 'claude-opus-5-5', false)).toBe(false)
+    expect(keepsCache({ family: 'opus', effort: 'xhigh' }, 'claude-opus-5-5', false)).toBe(true)
+    expect(keepsCache({ family: 'fable', effort: 'low' }, 'claude-fable-5-1', false)).toBe(true)
+    expect(keepsCache({ family: 'opus', effort: 'xhigh' }, 'claude-opus-5-5', true)).toBe(false)
+    expect(keepsCache({ family: 'sonnet', effort: 'xhigh' }, 'claude-sonnet-5', false)).toBe(false)
+    expect(keepsCache({ family: 'sonnet', effort: 'high' }, 'claude-opus-5-5', false)).toBe(false)
     expect([undefined, '', '0', 'false', '1'].map(isEnvOn)).toEqual([false, false, false, false, true])
   })
 
