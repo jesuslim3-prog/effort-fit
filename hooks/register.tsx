@@ -406,7 +406,7 @@ export const register: Register = on => {
         ) : null}
         {rows.map(r => (
           <Text key={r.agentId} wrap="wrap">
-            {ARROW[r.direction]} 서브에이전트 {r.type} {shortModel(r.model)}·{r.effort}: {r.reason} (에이전트 정의에서 조정)
+            {ARROW[r.direction]} 서브에이전트 {r.type} {shortModel(r.model)}·{r.effort}: {r.reason}
           </Text>
         ))}
         <Button key="hide" label="숨기기" onPress={() => update($, isHidden, () => true)} />
