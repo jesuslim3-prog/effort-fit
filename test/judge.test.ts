@@ -5,12 +5,15 @@ import {
   decide,
   emptyStats,
   holdUp,
+  isEnvOn,
+  keepsCache,
   notificationTracker,
   parsePrior,
   shortModel,
   signatureOf,
   suggest,
   turnSignal,
+  usageCounts,
 } from '../hooks/judge'
 
 describe('effort-fit judge', () => {
@@ -55,6 +58,21 @@ describe('effort-fit judge', () => {
     expect(suggest('up', 'claude-sonnet-5-5', 'max')).toBe('Opus 모델')
     expect(suggest('down', 'claude-opus-5-5', 'medium')).toBe('effort low')
     expect(suggest('down', 'claude-opus-5-5', 'low')).toBe('Sonnet 모델')
+  })
+
+  test('an effort change keeps the cache on 5.5-generation models off third-party providers, a model switch never', async () => {
+    expect(keepsCache('effort xhigh', 'claude-opus-5-5', false)).toBe(true)
+    expect(keepsCache('effort low', 'claude-fable-5-1', false)).toBe(true)
+    expect(keepsCache('effort xhigh', 'claude-opus-5-5', true)).toBe(false)
+    expect(keepsCache('effort xhigh', 'claude-sonnet-5', false)).toBe(false)
+    expect(keepsCache('Sonnet 모델', 'claude-opus-5-5', false)).toBe(false)
+    expect([undefined, '', '0', 'false', '1'].map(isEnvOn)).toEqual([false, false, false, false, true])
+  })
+
+  test('usage counts carry the turn totals, nulls when the turn reported none', async () => {
+    const usage = { input_tokens: 3, output_tokens: 120, cache_read_input_tokens: 9000, cache_creation_input_tokens: 40 }
+    expect(usageCounts(usage)).toEqual({ inputTokens: 3, outputTokens: 120, cacheReadTokens: 9000, cacheCreationTokens: 40 })
+    expect(usageCounts(undefined).outputTokens).toBe(null)
   })
 
   test('failure signatures ignore numbers and spacing, and tell different Bash errors apart', async () => {

@@ -9,13 +9,16 @@ import {
   decide,
   emptyStats,
   holdUp,
+  isEnvOn,
   isNotificationPrompt,
+  keepsCache,
   notificationTracker,
   parsePrior,
   shortModel,
   signatureOf,
   suggest,
   turnSignal,
+  usageCounts,
   type Streak,
   type TurnStats,
   type UpHold,
@@ -81,6 +84,22 @@ async function classify($: EngineInterface, text: string): Promise<Prior | null>
     // Ollama down or slow: the meter runs on its deterministic signals alone.
     return null
   }
+}
+
+/**
+ * Whether changing effort starts a fresh cache here on any model: a
+ * third-party provider, or the betas stripped. A gateway or a HIPAA
+ * configuration cannot be told from here.
+ */
+async function isEffortCacheBroken($: EngineInterface): Promise<boolean> {
+  const values = await Promise.all([
+    $.env.get('CLAUDE_CODE_USE_BEDROCK'),
+    $.env.get('CLAUDE_CODE_USE_MANTLE'),
+    $.env.get('CLAUDE_CODE_USE_VERTEX'),
+    $.env.get('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'),
+  ])
+
+  return values.some(isEnvOn)
 }
 
 function statusText(v: FitView): string {
@@ -216,6 +235,9 @@ export const register: Register = on => {
       const agentLog = ((await $.store.get('agentLog')) ?? []) as unknown[]
       const agentEntry = {
         at: await $.clock.now(),
+        sessionId: await $.session.id(),
+        turnId: e.turnId,
+        durationMs: e.durationMs,
         agentId: e.agentId,
         isTracked: loop !== undefined,
         isAborted: e.isAborted,
@@ -223,6 +245,7 @@ export const register: Register = on => {
         model: loop?.model ?? '',
         effort: loop?.effort ?? '-',
         ...(loop === undefined ? {} : { ...loop.stats, repeated: loop.stats.repeated.length }),
+        ...usageCounts(e.usage),
       }
       await $.store.set('agentLog', [...agentLog, agentEntry].slice(-LOG_LIMIT))
 
@@ -248,11 +271,13 @@ export const register: Register = on => {
     const direction = held.shown
     const before = await read($, view)
     const isHeldOver = direction === 'up' && decided !== 'up' && before !== null
+    const suggestion = isHeldOver ? before.suggestion : suggest(direction, main.model, main.effort)
     const next_: FitView = {
       model: main.model,
       effort: main.effort,
       direction,
-      suggestion: isHeldOver ? before.suggestion : suggest(direction, main.model, main.effort),
+      suggestion,
+      keepsCache: suggestion !== null && keepsCache(suggestion, main.model, await isEffortCacheBroken($)),
       reasons: direction === 'keep' ? [] : isHeldOver ? before.reasons : signal.reasons,
       prior: isHeldOver ? before.prior : turnPrior,
     }
@@ -264,6 +289,9 @@ export const register: Register = on => {
 
     const entry = {
       at: await $.clock.now(),
+      sessionId: await $.session.id(),
+      turnId: e.turnId,
+      durationMs: e.durationMs,
       model: main.model,
       effort: main.effort,
       signal: signal.direction,
@@ -271,6 +299,7 @@ export const register: Register = on => {
       prior: turnPrior,
       ...stats,
       repeated: stats.repeated.length,
+      ...usageCounts(e.usage),
     }
     const log = ((await $.store.get('log')) ?? []) as unknown[]
     await $.store.set('log', [...log, entry].slice(-LOG_LIMIT))
@@ -287,13 +316,15 @@ export const register: Register = on => {
       ran.skip === undefined &&
       v !== null &&
       v.direction !== 'keep' &&
-      v.suggestion !== null
+      v.suggestion !== null &&
+      !v.keepsCache
     if (isToasted) {
       $.ui.toast(`compaction 직후입니다. 지금 ${v.suggestion}(으)로 바꾸면 캐시 손실 없이 적용됩니다.`)
     }
     const compactLog = ((await $.store.get('compactLog')) ?? []) as unknown[]
     const compactEntry = {
       at: await $.clock.now(),
+      sessionId: await $.session.id(),
       trigger: e.trigger,
       agentId: e.agentId ?? null,
       skip: ran.skip ?? null,
@@ -323,9 +354,11 @@ export const register: Register = on => {
             {v.prior === null ? '' : ` · 분류 ${v.prior}`}
           </Text>
         ) : null}
-        {hasMain ? (
+        {hasMain && v !== null ? (
           <Text dimColor wrap="wrap">
-            적용은 다음 compaction 직후나 새 세션에서 하세요. 대화 중간 전환은 컨텍스트 전체를 캐시 없이 다시 처리합니다.
+            {v.keepsCache
+              ? '이 모델에서는 effort를 바꿔도 프롬프트 캐시가 유지되니 지금 바꿔도 됩니다.'
+              : '적용은 다음 compaction 직후나 새 세션에서 하세요. 대화 중간 전환은 컨텍스트 전체를 캐시 없이 다시 처리합니다.'}
           </Text>
         ) : null}
         {rows.map(r => (

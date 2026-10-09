@@ -9,6 +9,8 @@ export type FitView = {
   direction: Direction
   /** What to change to, e.g. "effort xhigh"; null when there is nothing to change to. */
   suggestion: string | null
+  /** Whether taking the suggestion now keeps the prompt cache. */
+  keepsCache: boolean
   reasons: string[]
   prior: Prior | null
 }

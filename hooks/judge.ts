@@ -172,6 +172,42 @@ export function suggest(direction: Direction, model: string, effort: string): st
   return null
 }
 
+/**
+ * Models on which changing effort keeps the prompt cache on Anthropic's own
+ * API (code.claude.com/docs/en/prompt-caching, "Changing effort level").
+ */
+const EFFORT_KEEPS_CACHE = /(?:opus|sonnet|haiku)-5-5(?!\d)|fable-5-1(?!\d)/i
+
+/** An environment switch counts as on unless unset, empty, "0" or "false". */
+export const isEnvOn = (value: string | undefined): boolean =>
+  value !== undefined && value !== '' && value !== '0' && value.toLowerCase() !== 'false'
+
+/**
+ * Whether taking the suggestion now keeps the prompt cache: only an effort
+ * change, on a model that keeps it, off the providers where it does not.
+ * A model switch always starts a fresh cache.
+ */
+export function keepsCache(suggestion: string, model: string, isEffortCacheBroken: boolean): boolean {
+  return suggestion.startsWith('effort ') && !isEffortCacheBroken && EFFORT_KEEPS_CACHE.test(model)
+}
+
+type Usage = {
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+}
+
+/** A turn's summed token counts for the log; nulls when it reported none (an interrupt, an API error). */
+export function usageCounts(usage: Usage | undefined) {
+  return {
+    inputTokens: usage?.input_tokens ?? null,
+    outputTokens: usage?.output_tokens ?? null,
+    cacheReadTokens: usage?.cache_read_input_tokens ?? null,
+    cacheCreationTokens: usage?.cache_creation_input_tokens ?? null,
+  }
+}
+
 /** "claude-opus-5-5" → "Opus 5.5"; anything else as given. */
 export function shortModel(model: string): string {
   const m = /(opus|sonnet|haiku|fable)-(\d+)-(\d+)/i.exec(model)
