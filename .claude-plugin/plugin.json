@@ -1,0 +1,8 @@
+{
+  "name": "effort-fit",
+  "version": "0.1.0",
+  "description": "[Experimental] Shows whether the session's model and effort fit the work, and recommends a change only at cache-safe points",
+  "author": { "name": "jesuslim3-prog", "url": "https://github.com/jesuslim3-prog" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

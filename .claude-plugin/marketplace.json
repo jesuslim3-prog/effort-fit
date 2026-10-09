@@ -1,0 +1,6 @@
+{
+  "name": "effort-fit",
+  "owner": { "name": "jesuslim3-prog" },
+  "description": "[Experimental] effort-fit: a status meter for whether the session's model and effort fit the work",
+  "plugins": [{ "name": "effort-fit", "source": "./" }]
+}
