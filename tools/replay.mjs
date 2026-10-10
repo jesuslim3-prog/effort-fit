@@ -6,9 +6,14 @@
 //
 // Set JUDGE=<path to a judge module> to replay a changed copy of the rules.
 // Needs Node 23.6 or later (it imports the .ts file directly).
-// Not the live plugin: transcripts carry no read-only flag, so read-only is
-// guessed (mode "strict": Bash never read-only; "heur": by its first word),
-// and there is no local classifier read (prior null).
+//
+// Tool results go through the same fromTranscript → recordTool → readLevel →
+// judge path the live plugin's fromToolCall → recordTool → … takes. What a
+// transcript does not carry is marked, not invented: read-only is a guess
+// (readOnlyBasis "estimate:strict", Bash never read-only, or "estimate:heur",
+// by its first word), and the local classifier's read is "unavailable" (prior
+// null, so a light read always needs three light turns and nothing is held
+// back for a heavy one).
 import fs from 'fs'
 import path from 'path'
 
@@ -21,6 +26,14 @@ const RO_BASH = /^\s*(?:cd\s+[^&;|]+&&\s*)?(?:ls|cat|head|tail|wc|grep|rg|find|p
 const MODES = ['strict', 'heur']
 
 const textOf = c => (typeof c === 'string' ? c : Array.isArray(c) ? c.map(x => (x && x.text) || '').join('\n') : '')
+
+/** The read-only guess a mode makes for one call. */
+function guessReadOnly(mode, use) {
+  if (READ_ONLY_TOOLS.has(use.name)) return true
+  if (mode === 'strict' || use.name !== 'Bash') return false
+  const cmd = String((use.input || {}).command || '')
+  return RO_BASH.test(cmd) && !/[>]|\brm\b|\bmv\b|\bcp\b/.test(cmd)
+}
 
 const rows = []
 const errorHeads = {}
@@ -44,23 +57,28 @@ for (const dir of dirs) {
       if (t.isNotification) { notificationTurns += 1; return }
       if (t.isAborted) { abortedTurns += 1; return }
       if (t.steps.size === 0) return
-      history = [...history, t.failures].slice(-(FAILURE_WINDOW - 1))
+      for (const mode of MODES) t.c[mode].stats.steps = t.steps.size
+      const s = t.c.strict.stats
+      history = [...history, t.c.strict.failures].slice(-(FAILURE_WINDOW - 1))
       const out = [...t.usage.values()].reduce((n, u) => n + (u.output_tokens || 0), 0)
       const row = {
-        project, session, at: t.at, model: t.model, effort: t.effort, steps: t.steps.size, tools: t.tools,
-        edits: t.edits, errors: t.errors, repeated: t.repeated.length, editFailLoops: t.editFailLoops,
-        outputTokens: out, prompt: t.prompt, denials: t.denials || 0, errorSigs: t.failures.map(s => s.slice(0, 60)),
+        project, session, at: t.at, model: t.model, effort: t.effort, steps: s.steps, tools: s.tools,
+        edits: s.edits, errors: s.errors, refusals: s.refusals, strong: s.strong, repeated: s.repeated.length,
+        editFailLoops: s.editFailLoops, outputTokens: out, prompt: t.prompt, prior: 'unavailable',
+        errorSigs: t.c.strict.failures.map(x => x.slice(0, 60)),
       }
       for (const mode of MODES) {
-        const stats = { ...J.emptyStats(), steps: t.steps.size, tools: t.tools, readOnly: t.readOnly[mode], edits: t.edits, errors: t.errors, repeated: t.repeated, editFailLoops: t.editFailLoops }
+        const stats = t.c[mode].stats
         recent[mode] = [...recent[mode], stats].slice(-J.WINDOW)
         const reading = J.readLevel(recent[mode], null)
-        const rec = J.recommend(t.model, t.effort, reading, recent[mode].length)
+        const j = J.judge(t.model, t.effort, reading, null)
+        row[`readOnlyBasis_${mode}`] = `estimate:${mode}`
         row[`light_${mode}`] = J.turnSignal(stats).direction === 'down'
         row[`level_${mode}`] = reading.level
-        row[`tier_${mode}`] = J.tierOf(t.model, t.effort)
-        row[`target_${mode}`] = rec === null ? null : rec.level
-        row[`rec_${mode}`] = rec === null ? null : J.comboLabel(rec.options[0])
+        row[`tier_${mode}`] = j.current
+        row[`status_${mode}`] = j.status
+        row[`target_${mode}`] = j.target
+        row[`rec_${mode}`] = j.options[0] === undefined ? null : J.comboLabel(j.options[0])
       }
       rows.push(row)
     }
@@ -80,10 +98,9 @@ for (const dir of dirs) {
             const kind = o.origin.kind || ''
             turn = {
               at: o.timestamp, prompt: text.slice(0, 80).replace(/\s+/g, ' '),
-              isNotification: J.isNotificationPrompt(kind === 'task-notification' ? 'task-notification' : kind, text),
+              isNotification: J.isNotificationPrompt(kind, text),
               isAborted: false, steps: new Set(), usage: new Map(), model: '', effort: '-',
-              tools: 0, readOnly: { strict: 0, heur: 0 }, edits: 0, errors: 0, repeated: [], failures: [],
-              editFailLoops: 0, isAfterEdit: false,
+              c: { strict: J.newCollector(), heur: J.newCollector() },
             }
           } else if (turn !== null && /\[Request interrupted by user/.test(text)) {
             turn.isAborted = true
@@ -91,28 +108,18 @@ for (const dir of dirs) {
           continue
         }
         if (turn === null) continue
-        if (o.toolDenialKind) turn.denials = (turn.denials || 0) + 1
         for (const r of results) {
           const use = tools.get(r.tool_use_id)
-          if (!use || J.IGNORED_TOOLS.includes(use.name)) continue
-          const text = textOf(r.content)
-          turn.tools += 1
-          const cmd = use.name === 'Bash' ? String((use.input || {}).command || '') : ''
-          if (READ_ONLY_TOOLS.has(use.name)) { turn.readOnly.strict += 1; turn.readOnly.heur += 1 }
-          else if (use.name === 'Bash' && RO_BASH.test(cmd) && !/[>]|\brm\b|\bmv\b|\bcp\b/.test(cmd)) turn.readOnly.heur += 1
-          if (J.EDIT_TOOLS.includes(use.name)) { turn.edits += 1; turn.isAfterEdit = true }
-          const hidden = r.is_error !== true && use.name === 'Bash' && J.isHiddenFailure(text)
-          if (r.is_error === true || hidden) {
-            if (hidden) hiddenOnly += 1
-            turn.errors += 1
-            const sig = J.signatureOf(use.name, text)
-            const head = sig.slice(0, 70)
-            errorHeads[head] = (errorHeads[head] || 0) + 1
-            if ([...history.flat(), ...turn.failures].includes(sig) && !turn.repeated.includes(sig)) turn.repeated.push(sig)
-            turn.failures.push(sig)
-            if (use.name === 'Bash' && turn.isAfterEdit) turn.editFailLoops += 1
+          if (!use) continue
+          const before = turn.c.strict.failures.length
+          for (const mode of MODES) {
+            J.recordTool(turn.c[mode], J.fromTranscript(use.name, r, o.toolDenialKind, guessReadOnly(mode, use)), history.flat())
           }
-          if (use.name === 'Bash') turn.isAfterEdit = false
+          if (turn.c.strict.failures.length > before) {
+            const sig = turn.c.strict.failures[before]
+            errorHeads[sig.slice(0, 70)] = (errorHeads[sig.slice(0, 70)] || 0) + 1
+            if (r.is_error !== true) hiddenOnly += 1
+          }
         }
       } else if (o.type === 'assistant' && turn !== null) {
         if (m.id) { turn.steps.add(m.id); if (m.usage) turn.usage.set(m.id, m.usage) }
@@ -128,12 +135,14 @@ for (const dir of dirs) {
 }
 
 fs.writeFileSync(outPath, JSON.stringify({ rows, notificationTurns, abortedTurns, hiddenOnly, errorHeads }))
-console.log(`turns ${rows.length}, notification turns skipped ${notificationTurns}, aborted ${abortedTurns}, hidden-only failures ${hiddenOnly}`)
+const refusals = rows.reduce((n, r) => n + r.refusals, 0)
+console.log(`turns ${rows.length}, notification turns skipped ${notificationTurns}, aborted ${abortedTurns}, hidden-only failures ${hiddenOnly}, refusals left out ${refusals}`)
+console.log('read-only: estimated per mode below; local classifier: unavailable in transcripts (prior null)')
 const share = n => `${Math.round((100 * n) / Math.max(rows.length, 1))}%`
 for (const mode of MODES) {
   const levels = [0, 1, 2, 3].map(l => share(rows.filter(r => r[`level_${mode}`] === l).length))
-  const fit = rows.filter(r => r[`tier_${mode}`] !== null && r[`target_${mode}`] === null).length
-  const up = rows.filter(r => r[`target_${mode}`] !== null && r[`target_${mode}`] > r[`tier_${mode}`]).length
-  const down = rows.filter(r => r[`target_${mode}`] !== null && r[`target_${mode}`] < r[`tier_${mode}`]).length
-  console.log(`[${mode}] levels light/normal/heavy/very heavy ${levels.join(' ')} | fit ${share(fit)} down ${share(down)} up ${share(up)}`)
+  const status = s => share(rows.filter(r => r[`status_${mode}`] === s).length)
+  const down = rows.filter(r => r[`status_${mode}`] === 'change' && r[`target_${mode}`] < r[`tier_${mode}`]).length
+  const up = rows.filter(r => r[`status_${mode}`] === 'change' && r[`target_${mode}`] > r[`tier_${mode}`]).length
+  console.log(`[estimate:${mode}] levels light/normal/heavy/very heavy ${levels.join(' ')} | fit ${status('fit')} change ${status('change')} (up ${share(up)}, down ${share(down)}) observing ${status('observing')} unsupported ${status('unsupported')} no-option ${status('no-option')}`)
 }

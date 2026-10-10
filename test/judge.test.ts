@@ -1,53 +1,196 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  TARGETS,
+  WINDOW,
+  cacheNote,
+  comboLabel,
+  compactionToast,
   emptyStats,
+  fromToolCall,
+  fromTranscript,
   isEnvOn,
   isHiddenFailure,
+  judge,
   keepsCache,
+  newCollector,
   notificationTracker,
   parsePrior,
   priorTracker,
   readLevel,
-  recommend,
-  runnable,
+  recordTool,
   shortModel,
   signatureOf,
+  statusLine,
   tierOf,
+  turnSignal,
   usageCounts,
+  verdictText,
+  type ToolEvent,
+  type TurnStats,
 } from '../hooks/judge'
 
-const failing = { ...emptyStats(), steps: 6, tools: 4, errors: 2, repeated: ['Bash: x'] }
-const light = { ...emptyStats(), steps: 2, tools: 2, readOnly: 2 }
+const turn = (over: Partial<TurnStats>): TurnStats => ({ ...emptyStats(), ...over })
+const light = turn({ steps: 2, tools: 1, readOnly: 1 })
+const quiet = turn({ steps: 1 })
+const failing = turn({ steps: 6, tools: 4, errors: 2, strong: 1 })
+const has = (text: string, part: string): boolean => text.includes(part)
+
+const event = (tool: string, text: string, isError: boolean, isRefused = false): ToolEvent => ({ tool, text, isError, isRefused, isReadOnly: false })
+const fail = (text: string): ToolEvent => event('Bash', text, true)
+const edit = event('Edit', 'ok', false)
+const run = (events: ToolEvent[], earlier: readonly string[] = []) => {
+  const c = newCollector()
+  for (const e of events) {
+    recordTool(c, e, earlier)
+  }
+
+  return c
+}
 
 describe('effort-fit judge', () => {
-  test('a repeated failure reads heavy at once, three strong events very heavy, and Haiku·medium goes straight to Fable·high', async () => {
-    expect(readLevel([failing], null).level).toBe(2)
-    const piling = readLevel([{ ...failing, repeated: ['Bash: x', 'Bash: y'], editFailLoops: 2 }], null)
-    expect(piling.level).toBe(3)
-    expect(recommend('claude-haiku-5-5', 'medium', piling, 1)?.options[0]).toEqual({ family: 'fable', effort: 'high' })
+  test('every TARGETS entry sits on its own level in TIER', async () => {
+    const ids = { haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5-5', opus: 'claude-opus-5-5', fable: 'claude-fable-5-1' }
+    TARGETS.forEach((combos, level) => {
+      for (const c of combos) {
+        expect(tierOf(ids[c.family], c.effort)).toBe(level)
+      }
+    })
   })
 
-  test('weak evidence moves one level toward the read; going down waits three turns, and a full window to skip a level', async () => {
-    expect(recommend('claude-haiku-5-5', 'medium', readLevel([failing], null), 1)?.level).toBe(1)
-    expect(recommend('claude-opus-5-5', 'xhigh', readLevel([light, light], null), 2)).toBe(null)
-    expect(recommend('claude-opus-5-5', 'xhigh', readLevel([light, light, light], null), 3)?.level).toBe(1)
-    const five = readLevel([light, light, light, light, light], null)
-    expect(recommend('claude-opus-5-5', 'xhigh', five, 5)?.options[0]).toEqual({ family: 'haiku', effort: 'medium' })
+  test('a recommendation never repeats the session\'s combo or falls short of its target', async () => {
+    const heavy = readLevel([failing], null)
+    const opus46 = judge('claude-opus-4-6', 'high', heavy, null)
+    expect(opus46.status).toBe('change')
+    expect(opus46.options).toEqual([{ family: 'opus', effort: 'max' }])
+    expect(judge('claude-opus-5-5', 'high', heavy, null).options).toEqual([{ family: 'opus', effort: 'xhigh' }])
+    expect(judge('claude-opus-5-5', 'xhigh', heavy, null).status).toBe('fit')
+    const settled = readLevel([failing, light, light, light], null)
+    const none = judge('claude-opus-4-6', 'max', settled, null)
+    expect(none.status).toBe('no-option')
+    expect(has(none.reason, '무거움')).toBe(true)
+    expect(judge('some-other-model', 'high', heavy, null).status).toBe('unsupported')
+    expect(judge('claude-opus-5-5', '-', heavy, null).status).toBe('unsupported')
   })
 
-  test('a light read needs three light turns, two with a light prior, none with a heavy one; a fitting combo gets nothing', async () => {
+  test('strong evidence goes straight to the target, weak evidence one step, and the step is named as limited', async () => {
+    const piling = readLevel([turn({ steps: 6, tools: 4, errors: 3, strong: 3 })], null)
+    expect(judge('claude-haiku-5-5', 'medium', piling, null).options[0]).toEqual({ family: 'fable', effort: 'high' })
+    const once = judge('claude-haiku-5-5', 'medium', readLevel([failing], null), null)
+    expect([once.target, once.isStepLimited]).toEqual([1, true])
+    expect(has(verdictText(once, 2), '한 단계만')).toBe(true)
+  })
+
+  test('a held step down shows as observing, never as fit, and the status line names the detected level the panel does', async () => {
+    const two = readLevel([light, light], null)
+    const held = judge('claude-opus-5-5', 'xhigh', two, null)
+    expect(held.status).toBe('observing')
+    expect(has(verdictText(held, two.level), '추가 관찰 중')).toBe(true)
+    expect(has(verdictText(held, two.level), '적합')).toBe(false)
+    const three = readLevel([light, light, light], null)
+    const limited = judge('claude-opus-5-5', 'xhigh', three, null)
+    expect([limited.status, limited.target, limited.isStepLimited]).toEqual(['change', 1, true])
+    const view = {
+      model: 'claude-opus-5-5', effort: 'xhigh', level: three.level, current: limited.current, target: limited.target,
+      status: limited.status, statusReason: limited.reason, isStepLimited: limited.isStepLimited,
+      options: limited.options.map(c => ({ ...c, isModelSwitch: true, keepsCache: false })),
+      reasons: three.reasons, prior: null, contextTokens: null,
+    }
+    expect(has(statusLine(view), '감지 가벼움')).toBe(true)
+    expect(has(statusLine({ ...view, status: 'observing', options: [] }), '추가 관찰 중 (감지 가벼움)')).toBe(true)
+  })
+
+  test('a turn without tools is neither light nor heavy, so quiet turns hold a step down; a small lookup is light, long read-only digging is not', async () => {
+    expect(turnSignal(quiet).direction).toBe('keep')
+    expect(turnSignal(light).direction).toBe('down')
+    const digging = turn({ steps: 8, tools: 8, readOnly: 8 })
+    expect(turnSignal(digging).direction).toBe('keep')
+    for (const n of [3, 4, 5]) {
+      expect(judge('claude-opus-5-5', 'xhigh', readLevel(Array(n).fill(quiet), null), null).status).toBe('observing')
+    }
+    expect(judge('claude-opus-5-5', 'xhigh', readLevel([digging, digging, digging], null), null).status).toBe('observing')
+    expect(judge('claude-opus-5-5', 'xhigh', readLevel([light, light, light, digging, digging], null), null).status).toBe('change')
+  })
+
+  test('the local classifier: none needs three light turns, light two; heavy holds any step down and alone never reads very heavy', async () => {
     expect(readLevel([light, light], null).level).toBe(1)
-    expect(readLevel([light, light], 'light').level).toBe(0)
-    expect(readLevel([light, light, light], 'heavy').level).toBe(1)
-    expect(recommend('claude-sonnet-5-5', 'high', readLevel([light], null), 1)).toBe(null)
-    expect(recommend('claude-opus-5-5', 'high', readLevel([light], null), 1)).toBe(null)
-    expect(tierOf('some-other-model', 'high')).toBe(null)
+    const twoLight = readLevel([light, light], 'light')
+    expect(twoLight.level).toBe(0)
+    expect(judge('claude-opus-5-5', 'high', twoLight, 'light').status).toBe('observing')
+    const threeHeavy = readLevel([light, light, light], 'heavy')
+    expect(threeHeavy.level).toBe(1)
+    expect(judge('claude-opus-5-5', 'xhigh', threeHeavy, 'heavy').status).toBe('observing')
+    expect(readLevel([quiet], 'heavy').level).toBe(1)
+    expect(readLevel([turn({ steps: 12, tools: 12 })], 'heavy').level).toBe(2)
   })
 
-  test('on a model without xhigh, an xhigh combo falls back to high and a repeat is dropped', async () => {
-    expect(recommend('claude-opus-4-6', 'medium', readLevel([failing], null), 1)?.options).toEqual([{ family: 'opus', effort: 'high' }])
-    expect(runnable([{ family: 'opus', effort: 'xhigh' }], 'claude-opus-5-5')).toEqual([{ family: 'opus', effort: 'xhigh' }])
+  test('a failed result is one event: strong once when it repeats a recent failure or is a second-or-later failure right after an edit', async () => {
+    const twice = run([fail('E a'), fail('E a')]).stats
+    expect([twice.errors, twice.strong, twice.repeated.length]).toEqual([2, 1, 1])
+    const first = run([fail('E a')])
+    expect(first.stats.strong).toBe(0)
+    expect(run([fail('E a')], first.failures).stats.strong).toBe(1)
+    expect(run([fail('E a')], []).stats.strong).toBe(0)
+    const loops = (n: number) => run(['a', 'b', 'c'].slice(0, n).flatMap(x => [edit, fail(`T ${x}`)])).stats.strong
+    expect([loops(1), loops(2), loops(3)]).toEqual([0, 1, 2])
+    expect(run([edit, fail('X'), edit, fail('X')]).stats.strong).toBe(1)
+    expect(run([fail('A'), fail('B')]).stats.strong).toBe(0)
+    const outOfWindow = readLevel([failing, light, light, light, light, light].slice(-WINDOW), null)
+    expect(outOfWindow.strong).toBe(0)
+  })
+
+  test('a refusal is counted apart: not a tool call, an error or a repeat', async () => {
+    const refused = run([
+      fail('Permission for this action was denied by the Claude Code auto mode classifier.'),
+      fail('Permission for this action was denied by the Claude Code auto mode classifier.'),
+      event('Bash', 'Remove-Item on system path is blocked.', true, true),
+      event('AskUserQuestion', "The user doesn't want to proceed with this tool use.", true),
+    ]).stats
+    expect([refused.refusals, refused.tools, refused.errors, refused.strong]).toEqual([4, 0, 0, 0])
+  })
+
+  test('the live path and the replay path agree on the same results, two refusals included', async () => {
+    type Raw = { tool: string; text: string; isError: boolean; denialKind?: string; isReadOnly: boolean }
+    const denied = 'Permission to use Bash with command rm x has been denied.'
+    const turns: Raw[][] = [
+      [{ tool: 'Read', text: 'a', isError: false, isReadOnly: true }, { tool: 'Bash', text: denied, isError: true, denialKind: 'permission-rule', isReadOnly: false }, { tool: 'Bash', text: denied, isError: true, denialKind: 'permission-rule', isReadOnly: false }],
+      [{ tool: 'Bash', text: 'boom', isError: true, isReadOnly: false }, { tool: 'Bash', text: 'boom', isError: true, isReadOnly: false }],
+      [{ tool: 'Grep', text: 'hit', isError: false, isReadOnly: true }],
+    ]
+    const replay = (toEvent: (r: Raw) => ToolEvent) => {
+      let history: string[][] = []
+      const window: TurnStats[] = []
+
+      return turns.map(raws => {
+        const c = newCollector()
+        c.stats.steps = 2
+        for (const r of raws) {
+          recordTool(c, toEvent(r), history.flat())
+        }
+        history = [...history, c.failures].slice(-2)
+        window.push(c.stats)
+        const reading = readLevel(window.slice(-WINDOW), null)
+        const j = judge('claude-opus-5-5', 'high', reading, null)
+        const s = c.stats
+
+        return [s.errors, s.refusals, s.repeated.length, reading.level, j.status, j.options[0] === undefined ? null : comboLabel(j.options[0])]
+      })
+    }
+    const live = replay(r => fromToolCall(r.tool, { isError: r.isError, isReadOnly: r.isReadOnly, text: r.text }))
+    const transcript = replay(r => fromTranscript(r.tool, { is_error: r.isError, content: [{ type: 'text', text: r.text }] }, r.denialKind, r.isReadOnly))
+    expect(live).toEqual(transcript)
+    expect(live[0]?.slice(0, 2)).toEqual([0, 2])
+    expect(live[1]?.[3]).toBe(2)
+  })
+
+  test('cache notes say only what the docs vouch for, and mark the token count as an estimate', async () => {
+    expect(cacheNote({ isModelSwitch: false, keepsCache: true }, 57000)).toBe('effort만 변경 · 캐시 유지 (공식 문서 기준)')
+    const model = cacheNote({ isModelSwitch: true, keepsCache: false }, 57400)
+    expect([has(model, '모델 전환'), has(model, '약 57k'), has(model, '추정')]).toEqual([true, true, true])
+    expect(has(cacheNote({ isModelSwitch: false, keepsCache: false }, 1000), 'effort 변경')).toBe(true)
+    expect(has(cacheNote({ isModelSwitch: true, keepsCache: false }, null), '알 수 없음')).toBe(true)
+    const toast = compactionToast('Fable·high')
+    expect([has(toast, '손실 없이'), has(toast, '가장 적습니다')]).toEqual([false, true])
   })
 
   test('a classifier read belongs to the prompt it was asked for; a notification in between does not drop it, a newer prompt does', async () => {

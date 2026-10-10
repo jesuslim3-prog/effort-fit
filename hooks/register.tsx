@@ -1,29 +1,31 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentFit, Direction, FitOption, FitView, Prior } from '../types'
+import type { AgentFit, Direction, FitView, Prior } from '../types'
 import {
-  EDIT_TOOLS,
-  IGNORED_TOOLS,
   LEVEL_NAMES,
   WINDOW,
+  cacheNote,
   comboLabel,
-  emptyStats,
+  compactionToast,
   familyOf,
+  fromToolCall,
   isEnvOn,
-  isHiddenFailure,
   isNotificationPrompt,
+  judge,
   keepsCache,
+  newCollector,
   notificationTracker,
   parsePrior,
   priorTracker,
   readLevel,
-  recommend,
+  recordTool,
   shortModel,
-  signatureOf,
-  tierOf,
+  statusLine,
   turnSignal,
   usageCounts,
+  verdictText,
+  type Collector,
   type TurnStats,
 } from './judge'
 
@@ -43,7 +45,7 @@ const FAILURE_WINDOW = 3
 const LOG_LIMIT = 300
 const ARROW: Record<Direction, string> = { keep: '●', up: '▲', down: '▼' }
 
-const view = atom({ plugin: 'effort-fit', key: 'panel' } as const, null)
+const view = atom({ plugin: 'effort-fit', key: 'judgment' } as const, null)
 const agents = atom({ plugin: 'effort-fit', key: 'agents' } as const, [])
 const isHidden = atom({ plugin: 'effort-fit', key: 'isHidden' } as const, false)
 
@@ -51,19 +53,10 @@ type Loop = {
   type: string
   model: string
   effort: string
-  stats: TurnStats
-  failures: string[]
-  isAfterEdit: boolean
+  c: Collector
 }
 
-const newLoop = (): Loop => ({
-  type: '?',
-  model: '',
-  effort: '-',
-  stats: emptyStats(),
-  failures: [],
-  isAfterEdit: false,
-})
+const newLoop = (): Loop => ({ type: '?', model: '', effort: '-', c: newCollector() })
 
 async function classify($: EngineInterface, text: string): Promise<Prior | null> {
   try {
@@ -107,44 +100,9 @@ async function isEffortCacheBroken($: EngineInterface): Promise<boolean> {
 
 const levelBar = (level: number): string => '■'.repeat(level + 1) + '□'.repeat(3 - level)
 
-/** The session's model·effort against the recommendation: fit, short of the work, or more than it needs. */
-function verdict(v: FitView): string {
-  const tier = tierOf(v.model, v.effort)
-  if (tier === null) {
-    return '표에 없는 조합이라 추천하지 않음'
-  }
-  if (v.target === null) {
-    return '적합, 유지'
-  }
-  const name = LEVEL_NAMES[v.target] ?? ''
-
-  return v.target > tier ? `부족 → ${name}용 조합 권장` : `과함 → ${name}용 조합으로 낮춰도 됨`
-}
-
-function statusText(v: FitView): string {
-  const head = `${shortModel(v.model)}·${v.effort}`
-  const first = v.options[0]
-  if (v.target === null || first === undefined) {
-    return `${head} ● ${verdict(v)} (요구 ${LEVEL_NAMES[v.level] ?? ''})`
-  }
-  const arrow = v.target > (tierOf(v.model, v.effort) ?? 0) ? '▲' : '▼'
-
-  return `${head} ${arrow} ${comboLabel(first)} 권장 (요구 ${LEVEL_NAMES[v.target] ?? ''})`
-}
-
-function costText(o: FitOption, contextTokens: number | null): string {
-  if (o.keepsCache) {
-    return 'effort만 변경 · 캐시 유지'
-  }
-  const kind = o.isModelSwitch ? '모델 전환' : 'effort 변경'
-  const size = contextTokens === null ? '' : `약 ${Math.round(contextTokens / 1000)}k 토큰을 `
-
-  return `${kind} · ${size}캐시 없이 다시 읽음`
-}
-
-/** What a hidden panel waits on: it shows again once the recommendation changes. */
+/** What a hidden panel waits on: it shows again once the verdict or the recommendation changes. */
 const recommendationKey = (v: FitView | null): string =>
-  v?.options[0] === undefined ? 'fit' : comboLabel(v.options[0])
+  v === null ? '' : `${v.status}|${v.options[0] === undefined ? '' : comboLabel(v.options[0])}`
 
 export const register: Register = on => {
   const main = newLoop()
@@ -209,7 +167,7 @@ export const register: Register = on => {
     const loop = loopOf(e.agentId)
     loop.model = e.model
     loop.effort = e.effort === undefined ? '-' : String(e.effort)
-    loop.stats.steps += 1
+    loop.c.stats.steps += 1
 
     return yield* next(e)
   })
@@ -217,35 +175,8 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
     try {
-      if (ran.deny !== undefined || IGNORED_TOOLS.includes(e.tool)) {
-        return ran
-      }
-      const loop = loopOf(e.agentId)
-      const s = loop.stats
-      s.tools += 1
-      if (ran.isReadOnly === true) {
-        s.readOnly += 1
-      }
-      if (EDIT_TOOLS.includes(e.tool)) {
-        s.edits += 1
-        loop.isAfterEdit = true
-      }
-      const text = 'text' in ran ? ran.text : undefined
-      if (ran.isError === true || (e.tool === 'Bash' && isHiddenFailure(text))) {
-        s.errors += 1
-        const sig = signatureOf(e.tool, text)
-        const earlier = e.agentId === undefined ? mainHistory.flat() : []
-        if ([...earlier, ...loop.failures].includes(sig) && !s.repeated.includes(sig)) {
-          s.repeated.push(sig)
-        }
-        loop.failures.push(sig)
-        if (e.tool === 'Bash' && loop.isAfterEdit) {
-          s.editFailLoops += 1
-        }
-      }
-      if (e.tool === 'Bash') {
-        loop.isAfterEdit = false
-      }
+      const earlier = e.agentId === undefined ? mainHistory.flat() : []
+      recordTool(loopOf(e.agentId).c, fromToolCall(e.tool, ran), earlier)
     } catch {
       // Bookkeeping only; the call's result stands either way.
     }
@@ -258,7 +189,7 @@ export const register: Register = on => {
       const loop = loops.get(e.agentId)
       loops.delete(e.agentId)
       if (loop !== undefined && !e.isAborted) {
-        const signal = turnSignal(loop.stats)
+        const signal = turnSignal(loop.c.stats)
         const row: AgentFit = {
           agentId: e.agentId,
           type: loop.type,
@@ -281,7 +212,7 @@ export const register: Register = on => {
         type: loop?.type ?? '?',
         model: loop?.model ?? '',
         effort: loop?.effort ?? '-',
-        ...(loop === undefined ? {} : { ...loop.stats, repeated: loop.stats.repeated.length }),
+        ...(loop === undefined ? {} : { ...loop.c.stats, repeated: loop.c.stats.repeated.length }),
         ...usageCounts(e.usage),
       }
       await $.store.set('agentLog', [...agentLog, agentEntry].slice(-LOG_LIMIT))
@@ -289,11 +220,8 @@ export const register: Register = on => {
       return next(e)
     }
 
-    const stats = main.stats
-    const failures = main.failures
-    main.stats = emptyStats()
-    main.failures = []
-    main.isAfterEdit = false
+    const { stats, failures } = main.c
+    main.c = newCollector()
     if (e.isAborted || stats.steps === 0 || notifications.isNotificationTurn()) {
       return next(e)
     }
@@ -303,19 +231,23 @@ export const register: Register = on => {
     recent = [...recent, stats].slice(-WINDOW)
     const turnPrior = priors.current()
     const reading = readLevel(recent, turnPrior)
-    const rec = recommend(main.model, main.effort, reading, recent.length)
+    const j = judge(main.model, main.effort, reading, turnPrior)
     const isBroken = await isEffortCacheBroken($)
     const next_: FitView = {
       model: main.model,
       effort: main.effort,
       level: reading.level,
-      target: rec?.level ?? null,
-      options: (rec?.options ?? []).map(combo => ({
+      current: j.current,
+      target: j.target,
+      status: j.status,
+      statusReason: j.reason,
+      isStepLimited: j.isStepLimited,
+      options: j.options.map(combo => ({
         ...combo,
         isModelSwitch: familyOf(main.model) !== combo.family,
         keepsCache: keepsCache(combo, main.model, isBroken),
       })),
-      reasons: rec !== null && rec.level !== reading.level ? [...reading.reasons, '근거가 약해 한 단계만'] : reading.reasons,
+      reasons: reading.reasons,
       prior: turnPrior,
       contextTokens: (await $.session.usage()).context.tokens ?? null,
     }
@@ -324,7 +256,7 @@ export const register: Register = on => {
     if (recommendationKey(before) !== recommendationKey(next_)) {
       await update($, isHidden, () => false)
     }
-    $.ui.status(statusText(next_))
+    $.ui.status(statusLine(next_))
 
     const entry = {
       at: await $.clock.now(),
@@ -335,7 +267,9 @@ export const register: Register = on => {
       effort: main.effort,
       signal: signal.direction,
       level: reading.level,
+      current: next_.current,
       target: next_.target,
+      status: next_.status,
       recommended: next_.options[0] === undefined ? null : comboLabel(next_.options[0]),
       prior: turnPrior,
       ...stats,
@@ -359,7 +293,7 @@ export const register: Register = on => {
       first !== undefined &&
       !first.keepsCache
     if (isToasted) {
-      $.ui.toast(`compaction 직후입니다. 지금 ${comboLabel(first)}(으)로 바꾸면 캐시 손실 없이 적용됩니다.`)
+      $.ui.toast(compactionToast(comboLabel(first)))
     }
     const compactLog = ((await $.store.get('compactLog')) ?? []) as unknown[]
     const compactEntry = {
@@ -389,23 +323,25 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {v !== null ? (
           <Text wrap="wrap">
-            요구 수준 {levelBar(v.level)} {LEVEL_NAMES[v.level]} · {v.reasons.join(', ')}
-            {v.prior === null ? '' : ` · 분류 ${v.prior}`}
+            감지한 요구 수준 {levelBar(v.level)} {LEVEL_NAMES[v.level]} · {v.reasons.join(', ')}
+            {v.prior === null ? ' · 로컬 분류 없음' : ` · 로컬 분류 ${v.prior}`}
           </Text>
         ) : null}
         {v !== null ? (
           <Text wrap="wrap">
-            지금 {shortModel(v.model)}·{v.effort}: {verdict(v)}
+            지금 {shortModel(v.model)}·{v.effort}
+            {v.current === null ? '' : ` (${LEVEL_NAMES[v.current]} 수준)`}:{' '}
+            {verdictText({ ...v, reason: v.statusReason }, v.level)}
           </Text>
         ) : null}
         {v?.options.map((o, k) => (
           <Text key={comboLabel(o)} wrap="wrap">
-            {k === 0 ? '추천' : '대안'} {comboLabel(o)} · {costText(o, v.contextTokens)}
+            {k === 0 ? '추천' : '대안'} {comboLabel(o)} · {cacheNote(o, v.contextTokens)}
           </Text>
         ))}
         {v !== null && v.options.some(o => !o.keepsCache) ? (
           <Text dimColor wrap="wrap">
-            캐시가 깨지는 변경은 다음 compaction 직후에 하면 손실이 없습니다.
+            캐시가 깨지는 변경은 compaction 직후에 하면 캐시 없이 다시 처리하는 양이 가장 적습니다. 그래도 그 양이 0이 되지는 않습니다.
           </Text>
         ) : null}
         {rows.map(r => (

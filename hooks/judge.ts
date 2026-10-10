@@ -1,4 +1,4 @@
-import type { Combo, Direction, Family, Prior } from '../types'
+import type { Combo, Direction, FitView, Family, Prior, Status } from '../types'
 
 export const LADDER = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
@@ -20,11 +20,15 @@ const TIER: Record<Family, readonly number[]> = {
   fable: [2, 2, 3, 3, 3],
 }
 
-/** What each level recommends, then the alternative. */
-export const TARGETS: readonly (readonly [Combo, Combo])[] = [
+/**
+ * What each level recommends, then an alternative; every entry sits on its
+ * own level in TIER (a test holds the two together). Heavy has no
+ * alternative since Opus·high moved to normal.
+ */
+export const TARGETS: readonly (readonly Combo[])[] = [
   [{ family: 'haiku', effort: 'medium' }, { family: 'sonnet', effort: 'low' }],
   [{ family: 'sonnet', effort: 'high' }, { family: 'opus', effort: 'medium' }],
-  [{ family: 'opus', effort: 'xhigh' }, { family: 'opus', effort: 'high' }],
+  [{ family: 'opus', effort: 'xhigh' }],
   [{ family: 'fable', effort: 'high' }, { family: 'opus', effort: 'max' }],
 ]
 
@@ -45,10 +49,14 @@ export type TurnStats = {
   readOnly: number
   edits: number
   errors: number
-  /** Failure signatures seen at least twice in the recent window. */
+  /** Failure signatures seen again within the recent window, each once. */
   repeated: string[]
-  /** An edit followed by a failing command. */
+  /** Failing Bash runs right after an edit. */
   editFailLoops: number
+  /** Failed results that are a repeat of a recent failure, or a second-or-later failure right after an edit; each failed result counts at most once. */
+  strong: number
+  /** Results refused before they showed anything about the work (permission rules, the user, a hook); left out of tools and errors. */
+  refusals: number
 }
 
 /**
@@ -110,6 +118,8 @@ export const emptyStats = (): TurnStats => ({
   errors: 0,
   repeated: [],
   editFailLoops: 0,
+  strong: 0,
+  refusals: 0,
 })
 
 const fold = (line: string): string => line.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 100)
@@ -148,20 +158,106 @@ export function isHiddenFailure(text: string | undefined): boolean {
   return EXIT_LINE.test(last) || lines.some(line => NOT_FOUND_LINE.test(line))
 }
 
-export function turnSignal(s: TurnStats): { direction: Direction; reasons: string[] } {
-  const up: string[] = []
-  if (s.repeated.length > 0) {
-    up.push(`같은 실패 반복 (${s.repeated[0]})`)
-  }
-  if (s.editFailLoops >= 2) {
-    up.push(`수정 후 실패 ${s.editFailLoops}회`)
-  }
-  if (up.length > 0) {
-    return { direction: 'up', reasons: up }
-  }
+/**
+ * Claude Code's own wording when a call is refused rather than run: a
+ * permission rule or auto mode, the user, an interruption, a hook.
+ */
+const REFUSAL = /^(?:Permission (?:for this (?:action|command)|to use .+?) (?:was|has been) denied|The user doesn't want to (?:proceed with this tool use|take this action right now)|\[Request interrupted by user for tool use\]|The server-side auto mode classifier gave no verdict|PreToolUse:\S+ hook error)/
 
+export const isRefusalText = (text: string | undefined): boolean => REFUSAL.test((text ?? '').trimStart())
+
+/** One tool result, from the live hook or from a transcript. */
+export type ToolEvent = {
+  tool: string
+  text: string | undefined
+  isError: boolean
+  /** Refused by a marker the source carries: a plugin's deny, a transcript's denial kind. */
+  isRefused: boolean
+  /** Claude Code's own read-only check; a transcript only has a guess. */
+  isReadOnly: boolean | undefined
+}
+
+/** A live `tool.call` result. */
+export const fromToolCall = (
+  tool: string,
+  ran: { deny?: string; isError?: boolean; isReadOnly?: boolean; text?: string },
+): ToolEvent => ({ tool, text: ran.text, isError: ran.isError === true, isRefused: ran.deny !== undefined, isReadOnly: ran.isReadOnly })
+
+/** A transcript's `tool_result`, with the entry's `toolDenialKind` and a guessed read-only flag. */
+export function fromTranscript(
+  tool: string,
+  result: { is_error?: boolean; content?: unknown },
+  denialKind: string | undefined,
+  isReadOnly: boolean,
+): ToolEvent {
+  const c = result.content
+  const text = typeof c === 'string' ? c : Array.isArray(c) ? c.map(x => (x as { text?: string } | null)?.text ?? '').join('\n') : undefined
+
+  return { tool, text, isError: result.is_error === true, isRefused: denialKind !== undefined, isReadOnly }
+}
+
+/** One loop's running count of a turn. */
+export type Collector = { stats: TurnStats; failures: string[]; isAfterEdit: boolean }
+
+export const newCollector = (): Collector => ({ stats: emptyStats(), failures: [], isAfterEdit: false })
+
+/**
+ * Counts one tool result into the turn; the live hook and tools/replay.mjs
+ * both go through here. A refusal is counted apart and nothing else. A failed
+ * result is one event: strong once if it repeats a failure from this turn or
+ * `earlier` (the last turns' signatures), or is the second-or-later failure
+ * right after an edit in the turn, never twice.
+ */
+export function recordTool(c: Collector, e: ToolEvent, earlier: readonly string[]): void {
+  if (IGNORED_TOOLS.includes(e.tool)) {
+    return
+  }
+  const s = c.stats
+  if (e.isRefused || isRefusalText(e.text)) {
+    s.refusals += 1
+    return
+  }
+  s.tools += 1
+  if (e.isReadOnly === true) {
+    s.readOnly += 1
+  }
+  if (EDIT_TOOLS.includes(e.tool)) {
+    s.edits += 1
+    c.isAfterEdit = true
+  }
+  if (e.isError || (e.tool === 'Bash' && isHiddenFailure(e.text))) {
+    s.errors += 1
+    const sig = signatureOf(e.tool, e.text)
+    const isRepeat = [...earlier, ...c.failures].includes(sig)
+    const isEditFail = e.tool === 'Bash' && c.isAfterEdit
+    if (isEditFail) {
+      s.editFailLoops += 1
+    }
+    if (isRepeat && !s.repeated.includes(sig)) {
+      s.repeated.push(sig)
+    }
+    if (isRepeat || (isEditFail && s.editFailLoops >= 2)) {
+      s.strong += 1
+    }
+    c.failures.push(sig)
+  }
+  if (e.tool === 'Bash') {
+    c.isAfterEdit = false
+  }
+}
+
+/**
+ * A turn's own direction. Light needs a small, error-free turn that used at
+ * least one tool, all of them read-only: a turn with no tool calls says
+ * nothing about how hard the work was (design, review, analysis can run
+ * without tools), so it is neither light nor heavy.
+ */
+export function turnSignal(s: TurnStats): { direction: Direction; reasons: string[] } {
+  if (s.strong > 0) {
+    return { direction: 'up', reasons: [`강한 실패 신호 ${s.strong}회`] }
+  }
   const isOnlyReading = s.readOnly >= s.tools - s.edits
-  const isLight = s.errors === 0 && s.edits <= 1 && s.steps <= 4 && isOnlyReading
+  const isLight = s.tools > 0 && s.errors === 0 && s.edits <= 1 && s.steps <= 4 && isOnlyReading
   if (isLight) {
     return { direction: 'down', reasons: [`가벼운 턴 (${s.steps}단계, 편집 ${s.edits}, 오류 0)`] }
   }
@@ -172,38 +268,38 @@ export function turnSignal(s: TurnStats): { direction: Direction; reasons: strin
 /** A turn of sizeable work: many model requests or many edits. */
 const isHeavyTurn = (s: TurnStats): boolean => s.steps >= 10 || s.edits >= 3
 
-/** Facts that the work is going badly: a failure seen again, edits that keep failing. */
-const strongEvents = (s: TurnStats): number => s.repeated.length + (s.editFailLoops >= 2 ? 1 : 0)
-
-export type Reading = { level: number; strong: number; reasons: string[] }
+/** `light`: the window's light turns, the only evidence for going down. */
+export type Reading = { level: number; strong: number; light: number; reasons: string[] }
 
 /**
  * The level the last WINDOW main turns ask for. Failures are facts; the
- * prompt's look (prior) only tips a borderline window.
+ * prompt's look (prior) only tips a borderline window: light lets two light
+ * turns read light, heavy blocks a light read and with one sizeable turn
+ * reads heavy, never very heavy on its own.
  */
 export function readLevel(window: readonly TurnStats[], prior: Prior | null): Reading {
-  const strong = window.reduce((n, s) => n + strongEvents(s), 0)
+  const strong = window.reduce((n, s) => n + s.strong, 0)
   const heavy = window.filter(isHeavyTurn).length
   const light = window.filter(s => turnSignal(s).direction === 'down').length
   const reasons: string[] = []
   if (strong > 0) {
-    reasons.push(`최근 ${window.length}턴에 반복 실패·수정 후 실패 ${strong}회`)
+    reasons.push(`최근 ${window.length}턴에 강한 실패 신호 ${strong}회`)
   }
   if (heavy > 0) {
     reasons.push(`큰 작업 턴 ${heavy}회`)
   }
   if (strong >= 3) {
-    return { level: 3, strong, reasons }
+    return { level: 3, strong, light, reasons }
   }
   if (strong >= 1 || heavy >= 2 || (prior === 'heavy' && heavy >= 1)) {
-    return { level: 2, strong, reasons }
+    return { level: 2, strong, light, reasons }
   }
   const lightNeeded = prior === 'light' ? DOWN_AFTER - 1 : DOWN_AFTER
   if (prior !== 'heavy' && window.length >= lightNeeded && light === window.length) {
-    return { level: 0, strong, reasons: [`가벼운 턴 ${light}회 연속`] }
+    return { level: 0, strong, light, reasons: [`가벼운 턴 ${light}회 연속`] }
   }
 
-  return { level: 1, strong, reasons: reasons.length > 0 ? reasons : [`최근 ${window.length}턴에 실패 반복·큰 작업 없음`] }
+  return { level: 1, strong, light, reasons: reasons.length > 0 ? reasons : [`최근 ${window.length}턴에 강한 실패 신호·큰 작업 없음`] }
 }
 
 export const familyOf = (model: string): Family | null =>
@@ -217,53 +313,134 @@ export function tierOf(model: string, effort: string): number | null {
   return family === null || i < 0 ? null : (TIER[family][i] ?? null)
 }
 
-/**
- * The level to recommend from where the session sits: straight to the level
- * read when the evidence is strong, else one step toward it, so one spiky or
- * quiet stretch does not swing the session across the table. Going down waits
- * for DOWN_AFTER turns, and for a full window to go more than one step.
- */
-export function targetLevel(current: number, reading: Reading, turns: number): number {
-  const { level, strong } = reading
-  if (level < current && turns < DOWN_AFTER) {
-    return current
-  }
-  if (Math.abs(level - current) < 2) {
-    return level
-  }
-  const isSure = level > current ? strong >= 2 : turns >= WINDOW
-
-  return isSure ? level : current + Math.sign(level - current)
-}
+const tierOfCombo = (c: Combo): number => TIER[c.family][LADDER.indexOf(c.effort)] ?? 0
 
 /** Models without the xhigh effort level (code.claude.com/docs/en/model-config). */
 const NO_XHIGH = /(?:opus|sonnet)-4-6(?!\d)/i
 
-/** The combos as the session's model generation can run them: xhigh falls back to high where it does not exist, a repeat dropped. */
-export function runnable(options: readonly Combo[], model: string): Combo[] {
-  if (!NO_XHIGH.test(model)) {
-    return [...options]
-  }
+/**
+ * The combos that take the session to `target`: each TARGETS entry as the
+ * session's model generation can run it (xhigh tries high, then max, where it
+ * does not exist), kept only if it differs from the session's combo, serves
+ * the target in TIER, and when going down sits below the session's level.
+ */
+export function candidates(target: number, model: string, effort: string): Combo[] {
+  const current = tierOf(model, effort)
+  const family = familyOf(model)
   const out: Combo[] = []
-  for (const option of options) {
-    const combo: Combo = option.effort === 'xhigh' ? { ...option, effort: 'high' } : option
-    if (!out.some(c => c.family === combo.family && c.effort === combo.effort)) {
-      out.push(combo)
+  for (const option of TARGETS[target] ?? []) {
+    const efforts: Combo['effort'][] = option.effort === 'xhigh' && NO_XHIGH.test(model) ? ['high', 'max'] : [option.effort]
+    for (const e of efforts) {
+      const combo: Combo = { family: option.family, effort: e }
+      const tier = tierOfCombo(combo)
+      const isCurrent = combo.family === family && combo.effort === effort
+      const serves = tier >= target && (current === null || target > current || tier < current)
+      const isDuplicate = out.some(c => c.family === combo.family && c.effort === combo.effort)
+      if (!isCurrent && serves && !isDuplicate) {
+        out.push(combo)
+        break
+      }
     }
   }
 
   return out
 }
 
-/** The recommended combos and the level they serve, or null when the session already sits there. */
-export function recommend(model: string, effort: string, reading: Reading, turns: number) {
-  const current = tierOf(model, effort)
-  if (current === null) {
-    return null
-  }
-  const level = targetLevel(current, reading, turns)
+/**
+ * fit: the session's combo serves the level read. change: options take it
+ * to `target`. observing: a step down was read but is held back. unsupported:
+ * the combo is not in TIER. no-option: a change is due but nothing passes.
+ */
+export type Judgment = {
+  status: Status
+  /** The level the session's combo serves; null when unsupported. */
+  current: number | null
+  /** The level a change aims at, or a held step down would; null when fit or unsupported. */
+  target: number | null
+  options: Combo[]
+  /** The target stops short of the level read, the evidence being weak. */
+  isStepLimited: boolean
+  reason: string
+}
 
-  return level === current ? null : { level, options: runnable(TARGETS[level] ?? [], model) }
+/**
+ * What the panel says. Going up: straight to the level read when two strong
+ * events back it, else one step. Going down is held (observing) while the
+ * prompt is classified heavy or the window holds fewer than DOWN_AFTER light
+ * turns: turns without tools or with long read-only digging are no evidence
+ * the work is easy. It goes more than one step only on WINDOW light turns.
+ */
+export function judge(model: string, effort: string, reading: Reading, prior: Prior | null): Judgment {
+  const current = tierOf(model, effort)
+  const none = { options: [], isStepLimited: false }
+  if (current === null) {
+    const reason = effort === '-' ? 'effort를 쓰지 않는 모델' : '판정표에 없는 모델·effort'
+    return { status: 'unsupported', current: null, target: null, ...none, reason }
+  }
+  const { level, strong, light } = reading
+  if (level === current) {
+    return { status: 'fit', current, target: null, ...none, reason: '' }
+  }
+  if (level < current) {
+    const step = current - level >= 2 && light < WINDOW ? current - 1 : level
+    if (prior === 'heavy') {
+      return { status: 'observing', current, target: step, ...none, reason: '로컬 분류가 heavy라 낮추지 않음' }
+    }
+    if (light < DOWN_AFTER) {
+      return { status: 'observing', current, target: step, ...none, reason: `가벼운 턴이 ${light}개뿐이라 근거 부족 (${DOWN_AFTER}개부터 판단)` }
+    }
+  }
+  const isSure = level > current ? strong >= 2 : light >= WINDOW
+  const target = Math.abs(level - current) >= 2 && !isSure ? current + Math.sign(level - current) : level
+  const options = candidates(target, model, effort)
+  if (options.length === 0) {
+    return { status: 'no-option', current, target, ...none, reason: `${LEVEL_NAMES[target]} 수준을 채우는 다른 조합이 표에 없음` }
+  }
+
+  return { status: 'change', current, target, options, isStepLimited: target !== level, reason: '' }
+}
+
+export const STATUS_NAMES: Record<Status, string> = {
+  fit: '적합',
+  change: '변경 권장',
+  observing: '추가 관찰 중',
+  unsupported: '지원하지 않는 조합',
+  'no-option': '권장할 조합 없음',
+}
+
+const STATUS_MARK: Record<FitView['status'], string> = {
+  fit: '●',
+  change: '',
+  observing: '◌',
+  unsupported: '·',
+  'no-option': '·',
+}
+
+/** The status line: the session's combo, the verdict, and the detected level the panel shows too. */
+export function statusLine(v: FitView): string {
+  const head = `${shortModel(v.model)}·${v.effort}`
+  const detected = `(감지 ${LEVEL_NAMES[v.level] ?? ''})`
+  const first = v.options[0]
+  if (v.status === 'change' && first !== undefined) {
+    const arrow = (v.target ?? 0) > (v.current ?? 0) ? '▲' : '▼'
+    return `${head} ${arrow} ${comboLabel(first)} 권장 ${detected}`
+  }
+
+  return `${head} ${STATUS_MARK[v.status]} ${STATUS_NAMES[v.status]} ${detected}`
+}
+
+/** The panel's verdict line after the session's combo. */
+export function verdictText(j: Judgment, level: number): string {
+  const name = (l: number | null) => (l === null ? '' : (LEVEL_NAMES[l] ?? ''))
+  if (j.status === 'change') {
+    const limited = j.isStepLimited ? ` (감지 수준은 ${name(level)}이지만 근거가 약해 한 단계만)` : ''
+    return `${STATUS_NAMES.change} → ${name(j.target)} 수준${limited}`
+  }
+  if (j.status === 'observing') {
+    return `${STATUS_NAMES.observing} — ${name(j.target)} 수준으로 낮출 후보지만 ${j.reason}`
+  }
+
+  return j.reason === '' ? STATUS_NAMES[j.status] : `${STATUS_NAMES[j.status]} — ${j.reason}`
 }
 
 /** "Fable·high". */
@@ -287,6 +464,32 @@ export const isEnvOn = (value: string | undefined): boolean =>
 export function keepsCache(combo: Combo, model: string, isEffortCacheBroken: boolean): boolean {
   return familyOf(model) === combo.family && !isEffortCacheBroken && EFFORT_KEEPS_CACHE.test(model)
 }
+
+/**
+ * What taking an option costs in cache, as far as code.claude.com/docs/en/prompt-caching
+ * vouches: a model switch makes the next request read the whole conversation
+ * with no cache hits; an effort change on a model that keeps the cache costs
+ * nothing extra. `contextTokens` is the last response's input tokens
+ * ($.session.usage().context.tokens), only an estimate of what is re-read.
+ */
+export function cacheNote(option: { isModelSwitch: boolean; keepsCache: boolean }, contextTokens: number | null): string {
+  if (option.keepsCache) {
+    return 'effort만 변경 · 캐시 유지 (공식 문서 기준)'
+  }
+  const kind = option.isModelSwitch ? '모델 전환' : 'effort 변경'
+  if (contextTokens === null) {
+    return `${kind} · 대화 전체를 캐시 없이 다시 처리 (양은 알 수 없음)`
+  }
+
+  return `${kind} · 대화 전체 약 ${Math.round(contextTokens / 1000)}k 토큰을 캐시 없이 다시 처리 (마지막 응답의 입력 토큰으로 추정)`
+}
+
+/**
+ * Right after compaction the conversation is a short summary, so a
+ * cache-breaking change re-reads the least it can; the docs promise no more.
+ */
+export const compactionToast = (label: string): string =>
+  `compaction 직후입니다. 대화가 요약으로 짧아져 지금 ${label}(으)로 바꾸면 캐시 없이 다시 처리하는 양이 가장 적습니다.`
 
 type Usage = {
   input_tokens: number
