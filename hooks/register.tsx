@@ -16,6 +16,7 @@ import {
   keepsCache,
   notificationTracker,
   parsePrior,
+  priorTracker,
   readLevel,
   recommend,
   shortModel,
@@ -152,8 +153,7 @@ export const register: Register = on => {
   let mainHistory: string[][] = []
   /** The last WINDOW judged main turns, oldest first. */
   let recent: TurnStats[] = []
-  let promptSeq = 0
-  let prior: { seq: number; level: Prior } | null = null
+  const priors = priorTracker()
   const notifications = notificationTracker()
 
   const loopOf = (agentId: string | undefined): Loop => {
@@ -170,15 +170,17 @@ export const register: Register = on => {
   }
 
   on('prompt.submit', ($, e, next) => {
-    promptSeq += 1
-    const seq = promptSeq
     const text = e.text.trim()
     notifications.submitted(e.origin.kind, text)
-    if (text !== '' && !text.startsWith('/') && !isNotificationPrompt(e.origin.kind, text)) {
+    if (isNotificationPrompt(e.origin.kind, text)) {
+      return next(e)
+    }
+    const seq = priors.submitted()
+    if (text !== '' && !text.startsWith('/')) {
       $.clock.after(1, () => {
         void classify($, text).then(level => {
-          if (level !== null && seq === promptSeq) {
-            prior = { seq, level }
+          if (level !== null) {
+            priors.resolved(seq, level)
           }
         })
       })
@@ -299,7 +301,7 @@ export const register: Register = on => {
 
     const signal = turnSignal(stats)
     recent = [...recent, stats].slice(-WINDOW)
-    const turnPrior = prior !== null && prior.seq === promptSeq ? prior.level : null
+    const turnPrior = priors.current()
     const reading = readLevel(recent, turnPrior)
     const rec = recommend(main.model, main.effort, reading, recent.length)
     const isBroken = await isEffortCacheBroken($)

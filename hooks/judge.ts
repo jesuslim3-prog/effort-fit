@@ -79,6 +79,27 @@ export function notificationTracker() {
   }
 }
 
+/**
+ * The local classifier's read of the prompt now being worked on. Only work
+ * asked for moves it on (`submitted`), so a notification folded into a
+ * running turn leaves that turn's read in place; a late read of an older
+ * prompt is dropped.
+ */
+export function priorTracker() {
+  let seq = 0
+  let held: { seq: number; level: Prior } | null = null
+
+  return {
+    submitted: (): number => (seq += 1),
+    resolved: (at: number, level: Prior) => {
+      if (at === seq) {
+        held = { seq: at, level }
+      }
+    },
+    current: (): Prior | null => (held !== null && held.seq === seq ? held.level : null),
+  }
+}
+
 export const emptyStats = (): TurnStats => ({
   steps: 0,
   tools: 0,
@@ -213,6 +234,25 @@ export function targetLevel(current: number, reading: Reading, turns: number): n
   return isSure ? level : current + Math.sign(level - current)
 }
 
+/** Models without the xhigh effort level (code.claude.com/docs/en/model-config). */
+const NO_XHIGH = /(?:opus|sonnet)-4-6(?!\d)/i
+
+/** The combos as the session's model generation can run them: xhigh falls back to high where it does not exist, a repeat dropped. */
+export function runnable(options: readonly Combo[], model: string): Combo[] {
+  if (!NO_XHIGH.test(model)) {
+    return [...options]
+  }
+  const out: Combo[] = []
+  for (const option of options) {
+    const combo: Combo = option.effort === 'xhigh' ? { ...option, effort: 'high' } : option
+    if (!out.some(c => c.family === combo.family && c.effort === combo.effort)) {
+      out.push(combo)
+    }
+  }
+
+  return out
+}
+
 /** The recommended combos and the level they serve, or null when the session already sits there. */
 export function recommend(model: string, effort: string, reading: Reading, turns: number) {
   const current = tierOf(model, effort)
@@ -221,7 +261,7 @@ export function recommend(model: string, effort: string, reading: Reading, turns
   }
   const level = targetLevel(current, reading, turns)
 
-  return level === current ? null : { level, options: TARGETS[level] ?? [] }
+  return level === current ? null : { level, options: runnable(TARGETS[level] ?? [], model) }
 }
 
 /** "Fable·high". */

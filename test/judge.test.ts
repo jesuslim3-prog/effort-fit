@@ -7,8 +7,10 @@ import {
   keepsCache,
   notificationTracker,
   parsePrior,
+  priorTracker,
   readLevel,
   recommend,
+  runnable,
   shortModel,
   signatureOf,
   tierOf,
@@ -40,6 +42,22 @@ describe('effort-fit judge', () => {
     expect(readLevel([light, light, light], 'heavy').level).toBe(1)
     expect(recommend('claude-sonnet-5-5', 'high', readLevel([light], null), 1)).toBe(null)
     expect(tierOf('some-other-model', 'high')).toBe(null)
+  })
+
+  test('on a model without xhigh, an xhigh combo falls back to high and a repeat is dropped', async () => {
+    expect(recommend('claude-opus-4-6', 'medium', readLevel([failing], null), 1)?.options).toEqual([{ family: 'opus', effort: 'high' }])
+    expect(runnable([{ family: 'opus', effort: 'xhigh' }], 'claude-opus-5-5')).toEqual([{ family: 'opus', effort: 'xhigh' }])
+  })
+
+  test('a classifier read belongs to the prompt it was asked for; a notification in between does not drop it, a newer prompt does', async () => {
+    const priors = priorTracker()
+    const first = priors.submitted()
+    priors.resolved(first, 'light')
+    expect(priors.current()).toBe('light')
+    priors.submitted()
+    expect(priors.current()).toBe(null)
+    priors.resolved(first, 'heavy')
+    expect(priors.current()).toBe(null)
   })
 
   test('an effort change keeps the cache on 5.5-generation models off third-party providers, a model switch never', async () => {
