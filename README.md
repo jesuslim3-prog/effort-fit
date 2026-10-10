@@ -27,7 +27,7 @@
 | 가벼움 | 창 안의 턴이 모두 가벼운 턴(4단계 이하·편집 1회 이하·오류 0·읽기 전용 도구만)이고 3턴 이상(분류 light면 2턴, heavy면 해당 없음) | Haiku·medium | Sonnet·low |
 | 보통 | 그 밖 | Sonnet·high | Opus·medium |
 
-- 지금 조합이 맡는 수준은 `hooks/judge.ts`의 `TIER` 표로 정합니다. 요구 수준과 같으면 "적합, 유지", 다르면 그 수준의 추천·대안을 보여 줍니다. 표에 없는 모델에는 추천하지 않습니다. xhigh가 없는 모델(Opus 4.6·Sonnet 4.6)에서는 xhigh 조합을 high로 바꿔 보여 줍니다. `TIER`와 추천표(`TARGETS`)는 근거 데이터 없이 정한 초기값이며 기록으로 보정할 대상입니다. Fable을 맨 위에 둔 근거는 [공식 문서](https://code.claude.com/docs/en/model-config)입니다.
+- 지금 조합이 맡는 수준은 `hooks/judge.ts`의 `TIER` 표로 정합니다. 요구 수준과 같으면 "적합, 유지", 다르면 그 수준의 추천·대안을 보여 줍니다. 표에 없는 모델에는 추천하지 않습니다. xhigh가 없는 모델(Opus 4.6·Sonnet 4.6)에서는 xhigh 조합을 high로 바꿔 보여 줍니다. `TIER`와 추천표(`TARGETS`)는 가정이며 기록으로 보정할 대상입니다. Opus·high는 "보통" 수준으로 봅니다. 실제 작업 6,758턴(90%가 Opus·high)을 재현해 보니 요구 수준이 대부분 보통이었습니다. Opus·high를 무거움으로 두면 69%의 턴에서 낮추라는 추천이 떴습니다. 그래서 보통 작업에서는 적합, 큰 작업이 몰릴 때만 Opus·xhigh를 추천하게 했습니다. Sonnet·high로 충분했는지는 이 재현으로 확인할 수 없으며, 사용자가 평소 고르는 조합을 보통의 기준으로 삼은 판단입니다. Fable을 맨 위에 둔 근거는 [공식 문서](https://code.claude.com/docs/en/model-config)입니다.
 - 두 수준 이상 건너뛰는 추천은 근거가 강할 때만 냅니다: 올릴 때는 반복 실패·수정 후 실패 2회 이상, 내릴 때는 5턴이 다 찼을 때. 아니면 한 수준만 옮깁니다. 내리는 추천은 3턴이 쌓인 뒤부터 냅니다.
 - 실패는 도구 결과의 오류 표시로 셉니다. Bash는 오류 표시가 없어도, 명령 뒤에 다른 명령을 붙여 실패가 가려진 경우(`foo; echo "exit=$?"`)를 위해 출력 마지막 줄이 0이 아닌 종료 코드 표기(`exit=127`, `Exit code: 2` 등)이거나 bash의 `…: command not found` 줄이 있으면 실패로 셉니다.
 - 실패의 같음은 오류 출력의 첫·마지막 의미 있는 줄로 봅니다(Bash의 `Exit code N` 줄은 무시).
@@ -79,6 +79,12 @@ claude plugin test .
 ```
 
 판정 로직은 `hooks/judge.ts`, 이벤트 수집과 표시는 `hooks/register.tsx`에 있습니다.
+
+판정 기준을 바꾸기 전에 `tools/replay.mjs`로 기존 Claude Code 대화 기록에 판정을 다시 돌려 보면, 실제 작업에서 패널이 무엇을 보여 줬을지 미리 볼 수 있습니다(Node 23.6 이상, 대화 기록은 읽기만 합니다). 대화 기록에는 읽기 전용 여부와 로컬 분류가 없어 실제 플러그인과 조금 다를 수 있습니다.
+
+```
+node --no-warnings tools/replay.mjs rows.json ~/.claude/projects/<프로젝트 폴더>
+```
 
 ## 라이선스
 

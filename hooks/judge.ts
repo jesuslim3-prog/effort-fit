@@ -9,12 +9,14 @@ export const LEVEL_NAMES = ['가벼움', '보통', '무거움', '매우 무거�
 
 /**
  * The level each model·effort serves, by effort low…max. An assumption to
- * calibrate against the log, as TARGETS is; the two agree with each other.
+ * calibrate against the log, as TARGETS is. Opus·high counts as normal: a
+ * replay of 6,758 real turns, nine in ten on Opus·high, read normal most of
+ * the time, and ranking Opus·high heavy advised stepping down on 69% of them.
  */
 const TIER: Record<Family, readonly number[]> = {
   haiku: [0, 0, 0, 1, 1],
   sonnet: [0, 1, 1, 1, 2],
-  opus: [1, 1, 2, 2, 3],
+  opus: [1, 1, 1, 2, 3],
   fable: [2, 2, 3, 3, 3],
 }
 

@@ -30,10 +30,10 @@ describe('effort-fit judge', () => {
 
   test('weak evidence moves one level toward the read; going down waits three turns, and a full window to skip a level', async () => {
     expect(recommend('claude-haiku-5-5', 'medium', readLevel([failing], null), 1)?.level).toBe(1)
-    expect(recommend('claude-opus-5-5', 'high', readLevel([light, light], null), 2)).toBe(null)
-    expect(recommend('claude-opus-5-5', 'high', readLevel([light, light, light], null), 3)?.level).toBe(1)
+    expect(recommend('claude-opus-5-5', 'xhigh', readLevel([light, light], null), 2)).toBe(null)
+    expect(recommend('claude-opus-5-5', 'xhigh', readLevel([light, light, light], null), 3)?.level).toBe(1)
     const five = readLevel([light, light, light, light, light], null)
-    expect(recommend('claude-opus-5-5', 'high', five, 5)?.options[0]).toEqual({ family: 'haiku', effort: 'medium' })
+    expect(recommend('claude-opus-5-5', 'xhigh', five, 5)?.options[0]).toEqual({ family: 'haiku', effort: 'medium' })
   })
 
   test('a light read needs three light turns, two with a light prior, none with a heavy one; a fitting combo gets nothing', async () => {
@@ -41,6 +41,7 @@ describe('effort-fit judge', () => {
     expect(readLevel([light, light], 'light').level).toBe(0)
     expect(readLevel([light, light, light], 'heavy').level).toBe(1)
     expect(recommend('claude-sonnet-5-5', 'high', readLevel([light], null), 1)).toBe(null)
+    expect(recommend('claude-opus-5-5', 'high', readLevel([light], null), 1)).toBe(null)
     expect(tierOf('some-other-model', 'high')).toBe(null)
   })
 
