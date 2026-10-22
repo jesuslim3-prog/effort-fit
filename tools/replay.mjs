@@ -11,9 +11,7 @@
 // judge path the live plugin's fromToolCall → recordTool → … takes. What a
 // transcript does not carry is marked, not invented: read-only is a guess
 // (readOnlyBasis "estimate:strict", Bash never read-only, or "estimate:heur",
-// by its first word), and the local classifier's read is "unavailable" (prior
-// null, so a light read always needs three light turns and nothing is held
-// back for a heavy one).
+// by its first word); the judge itself no longer reads it.
 import fs from 'fs'
 import path from 'path'
 import { pathToFileURL } from 'url'
@@ -65,14 +63,14 @@ for (const dir of dirs) {
       const row = {
         project, session, at: t.at, model: t.model, effort: t.effort, steps: s.steps, tools: s.tools,
         edits: s.edits, errors: s.errors, refusals: s.refusals, strong: s.strong, repeated: s.repeated.length,
-        editFailLoops: s.editFailLoops, outputTokens: out, prompt: t.prompt, prior: 'unavailable',
+        editFailLoops: s.editFailLoops, outputTokens: out, prompt: t.prompt,
         errorSigs: t.c.strict.failures.map(x => x.slice(0, 60)),
       }
       for (const mode of MODES) {
         const stats = t.c[mode].stats
         recent[mode] = [...recent[mode], stats].slice(-J.WINDOW)
-        const reading = J.readLevel(recent[mode], null)
-        const j = J.judge(t.model, t.effort, reading, null)
+        const reading = J.readLevel(recent[mode])
+        const j = J.judge(t.model, t.effort, reading)
         row[`readOnlyBasis_${mode}`] = `estimate:${mode}`
         row[`light_${mode}`] = J.turnSignal(stats).direction === 'down'
         row[`level_${mode}`] = reading.level
@@ -138,7 +136,7 @@ for (const dir of dirs) {
 fs.writeFileSync(outPath, JSON.stringify({ rows, notificationTurns, abortedTurns, hiddenOnly, errorHeads }))
 const refusals = rows.reduce((n, r) => n + r.refusals, 0)
 console.log(`turns ${rows.length}, notification turns skipped ${notificationTurns}, aborted ${abortedTurns}, hidden-only failures ${hiddenOnly}, refusals left out ${refusals}`)
-console.log('read-only: estimated per mode below; local classifier: unavailable in transcripts (prior null)')
+console.log('read-only: estimated per mode below')
 const share = n => `${Math.round((100 * n) / Math.max(rows.length, 1))}%`
 for (const mode of MODES) {
   const levels = [0, 1, 2, 3].map(l => share(rows.filter(r => r[`level_${mode}`] === l).length))

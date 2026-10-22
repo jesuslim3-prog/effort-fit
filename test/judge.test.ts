@@ -15,8 +15,6 @@ import {
   keepsCache,
   newCollector,
   notificationTracker,
-  parsePrior,
-  priorTracker,
   readLevel,
   recordTool,
   shortModel,
@@ -59,42 +57,42 @@ describe('effort-fit judge', () => {
   })
 
   test('a recommendation never repeats the session\'s combo or falls short of its target', async () => {
-    const heavy = readLevel([failing], null)
-    const opus46 = judge('claude-opus-4-6', 'high', heavy, null)
+    const heavy = readLevel([failing])
+    const opus46 = judge('claude-opus-4-6', 'high', heavy)
     expect(opus46.status).toBe('change')
     expect(opus46.options).toEqual([{ family: 'opus', effort: 'max' }])
-    expect(judge('claude-opus-5-5', 'high', heavy, null).options).toEqual([{ family: 'opus', effort: 'xhigh' }])
-    expect(judge('claude-opus-5-5', 'xhigh', heavy, null).status).toBe('fit')
-    const settled = readLevel([failing, light, light, light], null)
-    const none = judge('claude-opus-4-6', 'max', settled, null)
+    expect(judge('claude-opus-5-5', 'high', heavy).options).toEqual([{ family: 'opus', effort: 'xhigh' }])
+    expect(judge('claude-opus-5-5', 'xhigh', heavy).status).toBe('fit')
+    const settled = readLevel([failing, light, light, light])
+    const none = judge('claude-opus-4-6', 'max', settled)
     expect(none.status).toBe('no-option')
     expect(has(none.reason, '무거움')).toBe(true)
-    expect(judge('some-other-model', 'high', heavy, null).status).toBe('unsupported')
-    expect(judge('claude-opus-5-5', '-', heavy, null).status).toBe('unsupported')
+    expect(judge('some-other-model', 'high', heavy).status).toBe('unsupported')
+    expect(judge('claude-opus-5-5', '-', heavy).status).toBe('unsupported')
   })
 
   test('strong evidence goes straight to the target, weak evidence one step, and the step is named as limited', async () => {
-    const piling = readLevel([turn({ steps: 6, tools: 4, errors: 3, strong: 3 })], null)
-    expect(judge('claude-haiku-5-5', 'medium', piling, null).options[0]).toEqual({ family: 'fable', effort: 'high' })
-    const once = judge('claude-haiku-5-5', 'medium', readLevel([failing], null), null)
+    const piling = readLevel([turn({ steps: 6, tools: 4, errors: 3, strong: 3 })])
+    expect(judge('claude-haiku-5-5', 'medium', piling).options[0]).toEqual({ family: 'fable', effort: 'high' })
+    const once = judge('claude-haiku-5-5', 'medium', readLevel([failing]))
     expect([once.target, once.isStepLimited]).toEqual([1, true])
     expect(has(verdictText(once, 2), '한 단계만')).toBe(true)
   })
 
   test('a held step down shows as observing, never as fit, and the status line names the detected level the panel does', async () => {
-    const two = readLevel([light, light], null)
-    const held = judge('claude-opus-5-5', 'xhigh', two, null)
+    const two = readLevel([light, light])
+    const held = judge('claude-opus-5-5', 'xhigh', two)
     expect(held.status).toBe('observing')
     expect(has(verdictText(held, two.level), '추가 관찰 중')).toBe(true)
     expect(has(verdictText(held, two.level), '적합')).toBe(false)
-    const three = readLevel([light, light, light], null)
-    const limited = judge('claude-opus-5-5', 'xhigh', three, null)
+    const three = readLevel([light, light, light])
+    const limited = judge('claude-opus-5-5', 'xhigh', three)
     expect([limited.status, limited.target, limited.isStepLimited]).toEqual(['change', 1, true])
     const view = {
       model: 'claude-opus-5-5', effort: 'xhigh', level: three.level, current: limited.current, target: limited.target,
       status: limited.status, statusReason: limited.reason, isStepLimited: limited.isStepLimited,
       options: limited.options.map(c => ({ ...c, isModelSwitch: true, keepsCache: false })),
-      reasons: three.reasons, prior: null, contextTokens: null,
+      reasons: three.reasons, contextTokens: null,
     }
     expect(has(statusLine(view), '감지 가벼움')).toBe(true)
     expect(has(statusLine({ ...view, status: 'observing', options: [] }), '추가 관찰 중 (감지 가벼움)')).toBe(true)
@@ -108,22 +106,10 @@ describe('effort-fit judge', () => {
     const digging = turn({ steps: 8, tools: 8, readOnly: 8 })
     expect(turnSignal(digging).direction).toBe('keep')
     for (const n of [3, 4, 5]) {
-      expect(judge('claude-opus-5-5', 'xhigh', readLevel(Array(n).fill(quiet), null), null).status).toBe('observing')
+      expect(judge('claude-opus-5-5', 'xhigh', readLevel(Array(n).fill(quiet))).status).toBe('observing')
     }
-    expect(judge('claude-opus-5-5', 'xhigh', readLevel([digging, digging, digging], null), null).status).toBe('observing')
-    expect(judge('claude-opus-5-5', 'xhigh', readLevel([light, light, light, digging, digging], null), null).status).toBe('change')
-  })
-
-  test('the local classifier: none needs three light turns, light two; heavy holds any step down and alone never reads very heavy', async () => {
-    expect(readLevel([light, light], null).level).toBe(1)
-    const twoLight = readLevel([light, light], 'light')
-    expect(twoLight.level).toBe(0)
-    expect(judge('claude-opus-5-5', 'high', twoLight, 'light').status).toBe('observing')
-    const threeHeavy = readLevel([light, light, light], 'heavy')
-    expect(threeHeavy.level).toBe(1)
-    expect(judge('claude-opus-5-5', 'xhigh', threeHeavy, 'heavy').status).toBe('observing')
-    expect(readLevel([quiet], 'heavy').level).toBe(1)
-    expect(readLevel([turn({ steps: 12, tools: 12 })], 'heavy').level).toBe(2)
+    expect(judge('claude-opus-5-5', 'xhigh', readLevel([digging, digging, digging])).status).toBe('observing')
+    expect(judge('claude-opus-5-5', 'xhigh', readLevel([light, light, light, digging, digging])).status).toBe('change')
   })
 
   test('a failed result is one event: strong once when it repeats a recent failure or is a second-or-later failure right after an edit', async () => {
@@ -137,7 +123,7 @@ describe('effort-fit judge', () => {
     expect([loops(1), loops(2), loops(3)]).toEqual([0, 1, 2])
     expect(run([edit, fail('X'), edit, fail('X')]).stats.strong).toBe(1)
     expect(run([fail('A'), fail('B')]).stats.strong).toBe(0)
-    const outOfWindow = readLevel([failing, light, light, light, light, light].slice(-WINDOW), null)
+    const outOfWindow = readLevel([failing, light, light, light, light, light].slice(-WINDOW))
     expect(outOfWindow.strong).toBe(0)
   })
 
@@ -171,8 +157,8 @@ describe('effort-fit judge', () => {
         }
         history = [...history, c.failures].slice(-2)
         window.push(c.stats)
-        const reading = readLevel(window.slice(-WINDOW), null)
-        const j = judge('claude-opus-5-5', 'high', reading, null)
+        const reading = readLevel(window.slice(-WINDOW))
+        const j = judge('claude-opus-5-5', 'high', reading)
         const s = c.stats
 
         return [s.errors, s.refusals, s.repeated.length, reading.level, j.status, j.options[0] === undefined ? null : comboLabel(j.options[0])]
@@ -193,17 +179,6 @@ describe('effort-fit judge', () => {
     expect(has(cacheNote({ isModelSwitch: true, keepsCache: false }, null), '알 수 없음')).toBe(true)
     const toast = compactionToast('Fable·high')
     expect([has(toast, '손실 없이'), has(toast, '가장 적습니다')]).toEqual([false, true])
-  })
-
-  test('a classifier read belongs to the prompt it was asked for; a notification in between does not drop it, a newer prompt does', async () => {
-    const priors = priorTracker()
-    const first = priors.submitted()
-    priors.resolved(first, 'light')
-    expect(priors.current()).toBe('light')
-    priors.submitted()
-    expect(priors.current()).toBe(null)
-    priors.resolved(first, 'heavy')
-    expect(priors.current()).toBe(null)
   })
 
   test('an effort change keeps the cache on 5.5-generation models off third-party providers, a model switch never', async () => {
@@ -256,9 +231,7 @@ describe('effort-fit judge', () => {
     expect(tracker.isNotificationTurn()).toBe(false)
   })
 
-  test('helpers read model names and Ollama replies', async () => {
+  test('helpers read model names', async () => {
     expect(shortModel('claude-opus-5-5')).toBe('Opus 5.5')
-    expect(parsePrior(JSON.stringify({ response: '{"level":"heavy"}' }))).toBe('heavy')
-    expect(parsePrior('not json')).toBe(null)
   })
 })

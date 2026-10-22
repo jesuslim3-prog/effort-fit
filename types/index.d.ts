@@ -1,8 +1,5 @@
 export type Direction = 'keep' | 'up' | 'down'
 
-/** The local classifier's read of the prompt; a hint, never a trigger on its own. */
-export type Prior = 'light' | 'normal' | 'heavy'
-
 export type Family = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
 export type Combo = { family: Family; effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' }
@@ -34,7 +31,6 @@ export type FitView = {
   /** The recommendation, then the alternative; only when status is change. */
   options: FitOption[]
   reasons: string[]
-  prior: Prior | null
   /** Input tokens of the last response ($.session.usage().context.tokens): an estimate of what a cache-breaking change re-reads. */
   contextTokens: number | null
 }

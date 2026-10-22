@@ -1,4 +1,4 @@
-import type { Combo, Direction, FitView, Family, Prior, Status } from '../types'
+import type { Combo, Direction, FitView, Family, Status } from '../types'
 
 export const LADDER = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
@@ -86,27 +86,6 @@ export function notificationTracker() {
       isCurrent = isLastNotification
     },
     isNotificationTurn: () => isCurrent,
-  }
-}
-
-/**
- * The local classifier's read of the prompt now being worked on. Only work
- * asked for moves it on (`submitted`), so a notification folded into a
- * running turn leaves that turn's read in place; a late read of an older
- * prompt is dropped.
- */
-export function priorTracker() {
-  let seq = 0
-  let held: { seq: number; level: Prior } | null = null
-
-  return {
-    submitted: (): number => (seq += 1),
-    resolved: (at: number, level: Prior) => {
-      if (at === seq) {
-        held = { seq: at, level }
-      }
-    },
-    current: (): Prior | null => (held !== null && held.seq === seq ? held.level : null),
   }
 }
 
@@ -274,12 +253,11 @@ const isHeavyTurn = (s: TurnStats): boolean => s.steps >= 10 || s.edits >= 3
 export type Reading = { level: number; strong: number; light: number; reasons: string[] }
 
 /**
- * The level the last WINDOW main turns ask for. Failures are facts; the
- * prompt's look (prior) only tips a borderline window: light lets two light
- * turns read light, heavy blocks a light read and with one sizeable turn
- * reads heavy, never very heavy on its own.
+ * The level the last WINDOW main turns ask for, from deterministic signals
+ * alone: a local classifier's read of the prompt was tried and dropped, its
+ * reads nearly always light.
  */
-export function readLevel(window: readonly TurnStats[], prior: Prior | null): Reading {
+export function readLevel(window: readonly TurnStats[]): Reading {
   const strong = window.reduce((n, s) => n + s.strong, 0)
   const heavy = window.filter(isHeavyTurn).length
   const light = window.filter(s => turnSignal(s).direction === 'down').length
@@ -293,11 +271,10 @@ export function readLevel(window: readonly TurnStats[], prior: Prior | null): Re
   if (strong >= 3) {
     return { level: 3, strong, light, reasons }
   }
-  if (strong >= 1 || heavy >= 2 || (prior === 'heavy' && heavy >= 1)) {
+  if (strong >= 1 || heavy >= 2) {
     return { level: 2, strong, light, reasons }
   }
-  const lightNeeded = prior === 'light' ? DOWN_AFTER - 1 : DOWN_AFTER
-  if (prior !== 'heavy' && window.length >= lightNeeded && light === window.length) {
+  if (window.length >= DOWN_AFTER && light === window.length) {
     return { level: 0, strong, light, reasons: [`가벼운 턴 ${light}회 연속`] }
   }
 
@@ -368,11 +345,11 @@ export type Judgment = {
 /**
  * What the panel says. Going up: straight to the level read when two strong
  * events back it, else one step. Going down is held (observing) while the
- * prompt is classified heavy or the window holds fewer than DOWN_AFTER light
- * turns: turns without tools or with long read-only digging are no evidence
- * the work is easy. It goes more than one step only on WINDOW light turns.
+ * window holds fewer than DOWN_AFTER light turns: turns without tools or with
+ * long read-only digging are no evidence the work is easy. It goes more than
+ * one step only on WINDOW light turns.
  */
-export function judge(model: string, effort: string, reading: Reading, prior: Prior | null): Judgment {
+export function judge(model: string, effort: string, reading: Reading): Judgment {
   const current = tierOf(model, effort)
   const none = { options: [], isStepLimited: false }
   if (current === null) {
@@ -385,9 +362,6 @@ export function judge(model: string, effort: string, reading: Reading, prior: Pr
   }
   if (level < current) {
     const step = current - level >= 2 && light < WINDOW ? current - 1 : level
-    if (prior === 'heavy') {
-      return { status: 'observing', current, target: step, ...none, reason: '로컬 분류가 heavy라 낮추지 않음' }
-    }
     if (light < DOWN_AFTER) {
       return { status: 'observing', current, target: step, ...none, reason: `가벼운 턴이 ${light}개뿐이라 근거 부족 (${DOWN_AFTER}개부터 판단)` }
     }
@@ -519,16 +493,4 @@ export function shortModel(model: string): string {
   const [, family = '', major = '', minor = ''] = m
 
   return `${family.charAt(0).toUpperCase()}${family.slice(1).toLowerCase()} ${major}.${minor}`
-}
-
-export function parsePrior(responseText: string): Prior | null {
-  try {
-    const outer = JSON.parse(responseText) as { response?: string }
-    const inner = JSON.parse(outer.response ?? '') as { level?: string }
-    const level = inner.level
-
-    return level === 'light' || level === 'normal' || level === 'heavy' ? level : null
-  } catch {
-    return null
-  }
 }

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentFit, Direction, FitView, Prior } from '../types'
+import type { AgentFit, Direction, FitView } from '../types'
 import {
   LEVEL_NAMES,
   WINDOW,
@@ -16,8 +16,6 @@ import {
   keepsCache,
   newCollector,
   notificationTracker,
-  parsePrior,
-  priorTracker,
   readLevel,
   recordTool,
   shortModel,
@@ -29,17 +27,6 @@ import {
   type TurnStats,
 } from './judge'
 
-const OLLAMA_URL = 'http://127.0.0.1:11434/api/generate'
-const OLLAMA_MODEL = 'qwen3.8:27b'
-const CLASSIFY_PROMPT =
-  'Classify how much reasoning a coding agent needs for this request. ' +
-  'light = mechanical edits, lookups, bookkeeping. normal = ordinary implementation or explanation. ' +
-  'heavy = debugging repeated failures, design across many files, subtle correctness. Answer JSON only.\nRequest:\n'
-const CLASSIFY_SCHEMA = {
-  type: 'object',
-  properties: { level: { type: 'string', enum: ['light', 'normal', 'heavy'] } },
-  required: ['level'],
-}
 /** Main-thread turns whose failures count toward "repeated". */
 const FAILURE_WINDOW = 3
 const LOG_LIMIT = 300
@@ -57,30 +44,6 @@ type Loop = {
 }
 
 const newLoop = (): Loop => ({ type: '?', model: '', effort: '-', c: newCollector() })
-
-async function classify($: EngineInterface, text: string): Promise<Prior | null> {
-  try {
-    const body = JSON.stringify({
-      model: OLLAMA_MODEL,
-      prompt: CLASSIFY_PROMPT + text.slice(0, 2000),
-      stream: false,
-      think: false,
-      format: CLASSIFY_SCHEMA,
-      keep_alive: '30m',
-      options: { temperature: 0 },
-    })
-    const res = await $.http.fetch(OLLAMA_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body,
-    })
-
-    return res.ok ? parsePrior(res.text) : null
-  } catch {
-    // Ollama down or slow: the meter runs on its deterministic signals alone.
-    return null
-  }
-}
 
 /**
  * Whether changing effort starts a fresh cache here on any model: a
@@ -111,7 +74,6 @@ export const register: Register = on => {
   let mainHistory: string[][] = []
   /** The last WINDOW judged main turns, oldest first. */
   let recent: TurnStats[] = []
-  const priors = priorTracker()
   const notifications = notificationTracker()
 
   const loopOf = (agentId: string | undefined): Loop => {
@@ -132,16 +94,6 @@ export const register: Register = on => {
     notifications.submitted(e.origin.kind, text)
     if (isNotificationPrompt(e.origin.kind, text)) {
       return next(e)
-    }
-    const seq = priors.submitted()
-    if (text !== '' && !text.startsWith('/')) {
-      $.clock.after(1, () => {
-        void classify($, text).then(level => {
-          if (level !== null) {
-            priors.resolved(seq, level)
-          }
-        })
-      })
     }
 
     return next(e)
@@ -229,9 +181,8 @@ export const register: Register = on => {
 
     const signal = turnSignal(stats)
     recent = [...recent, stats].slice(-WINDOW)
-    const turnPrior = priors.current()
-    const reading = readLevel(recent, turnPrior)
-    const j = judge(main.model, main.effort, reading, turnPrior)
+    const reading = readLevel(recent)
+    const j = judge(main.model, main.effort, reading)
     const isBroken = await isEffortCacheBroken($)
     const next_: FitView = {
       model: main.model,
@@ -248,7 +199,6 @@ export const register: Register = on => {
         keepsCache: keepsCache(combo, main.model, isBroken),
       })),
       reasons: reading.reasons,
-      prior: turnPrior,
       contextTokens: (await $.session.usage()).context.tokens ?? null,
     }
     const before = await read($, view)
@@ -271,7 +221,6 @@ export const register: Register = on => {
       target: next_.target,
       status: next_.status,
       recommended: next_.options[0] === undefined ? null : comboLabel(next_.options[0]),
-      prior: turnPrior,
       ...stats,
       repeated: stats.repeated.length,
       ...usageCounts(e.usage),
@@ -324,7 +273,6 @@ export const register: Register = on => {
         {v !== null ? (
           <Text wrap="wrap">
             감지한 요구 수준 {levelBar(v.level)} {LEVEL_NAMES[v.level]} · {v.reasons.join(', ')}
-            {v.prior === null ? ' · 로컬 분류 없음' : ` · 로컬 분류 ${v.prior}`}
           </Text>
         ) : null}
         {v !== null ? (
