@@ -248,16 +248,18 @@ export function recordTool(c: Collector, e: ToolEvent, earlier: readonly string[
 
 /**
  * A turn's own direction. Light needs a small, error-free turn that used at
- * least one tool, all of them read-only: a turn with no tool calls says
- * nothing about how hard the work was (design, review, analysis can run
- * without tools), so it is neither light nor heavy.
+ * least one tool, of any kind: short coordination turns (a message to another
+ * session, a status check) count, not only reads; a replay of 8,665 real
+ * turns found 0.7% light when reads alone counted, and the panel never
+ * advised going down. A turn with no tool calls says nothing about how hard
+ * the work was (design, review, analysis can run without tools), so it is
+ * neither light nor heavy.
  */
 export function turnSignal(s: TurnStats): { direction: Direction; reasons: string[] } {
   if (s.strong > 0) {
     return { direction: 'up', reasons: [`강한 실패 신호 ${s.strong}회`] }
   }
-  const isOnlyReading = s.readOnly >= s.tools - s.edits
-  const isLight = s.tools > 0 && s.errors === 0 && s.edits <= 1 && s.steps <= 4 && isOnlyReading
+  const isLight = s.tools > 0 && s.errors === 0 && s.edits <= 1 && s.steps <= 4
   if (isLight) {
     return { direction: 'down', reasons: [`가벼운 턴 (${s.steps}단계, 편집 ${s.edits}, 오류 0)`] }
   }

@@ -100,9 +100,11 @@ describe('effort-fit judge', () => {
     expect(has(statusLine({ ...view, status: 'observing', options: [] }), '추가 관찰 중 (감지 가벼움)')).toBe(true)
   })
 
-  test('a turn without tools is neither light nor heavy, so quiet turns hold a step down; a small lookup is light, long read-only digging is not', async () => {
+  test('a turn without tools is neither light nor heavy, so quiet turns hold a step down; a small error-free turn of any tools is light, long read-only digging is not', async () => {
     expect(turnSignal(quiet).direction).toBe('keep')
     expect(turnSignal(light).direction).toBe('down')
+    expect(turnSignal(turn({ steps: 2, tools: 2, readOnly: 0 })).direction).toBe('down')
+    expect(turnSignal(turn({ steps: 2, tools: 2, errors: 1 })).direction).toBe('keep')
     const digging = turn({ steps: 8, tools: 8, readOnly: 8 })
     expect(turnSignal(digging).direction).toBe('keep')
     for (const n of [3, 4, 5]) {

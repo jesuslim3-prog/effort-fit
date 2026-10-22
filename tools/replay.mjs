@@ -16,8 +16,9 @@
 // back for a heavy one).
 import fs from 'fs'
 import path from 'path'
+import { pathToFileURL } from 'url'
 
-const J = await import(process.env.JUDGE ? path.resolve(process.env.JUDGE) : new URL('../hooks/judge.ts', import.meta.url).href)
+const J = await import(process.env.JUDGE ? pathToFileURL(path.resolve(process.env.JUDGE)).href : new URL('../hooks/judge.ts', import.meta.url).href)
 
 const [outPath, ...dirs] = process.argv.slice(2)
 const FAILURE_WINDOW = 3
