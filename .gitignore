@@ -1,3 +1,7 @@
 # Written by Claude Code when it loads the mod; regenerated per version.
 .claude-plugin/types/
 tsconfig.json
+
+# Output of tools/replay.mjs (contains prompt excerpts from local transcripts)
+rows.json
+replay-*.json
