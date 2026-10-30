@@ -2,7 +2,7 @@
 // to see what the panel would have shown on real work before changing a rule.
 //
 //   node --no-warnings tools/replay.mjs <out.json> <transcript dir>...
-//   e.g. node --no-warnings tools/replay.mjs rows.json ~/.claude/projects/C--Desktop-my-project
+//   e.g. node --no-warnings tools/replay.mjs tools/rows.json ~/.claude/projects/C--Desktop-my-project
 //
 // Set JUDGE=<path to a judge module> to replay a changed copy of the rules.
 // Needs Node 23.6 or later (it imports the .ts file directly).
