@@ -426,7 +426,7 @@ export const comboLabel = (c: Combo): string => `${c.family.charAt(0).toUpperCas
  * Models on which changing effort keeps the prompt cache on Anthropic's own
  * API (code.claude.com/docs/en/prompt-caching, "Changing effort level").
  */
-const EFFORT_KEEPS_CACHE = /(?:opus|sonnet|haiku)-5-5(?!\d)|fable-5-1(?!\d)/i
+const EFFORT_KEEPS_CACHE = /(?:opus|sonnet|haiku)-5-5(?!\d)|fable-(?:5-[1-9]\d*|[6-9]-\d+)(?!\d)/i
 
 /** An environment switch counts as on unless unset, empty, "0" or "false". */
 export const isEnvOn = (value: string | undefined): boolean =>

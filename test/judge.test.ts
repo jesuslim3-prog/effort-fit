@@ -184,6 +184,8 @@ describe('effort-fit judge', () => {
   test('an effort change keeps the cache on 5.5-generation models off third-party providers, a model switch never', async () => {
     expect(keepsCache({ family: 'opus', effort: 'xhigh' }, 'claude-opus-5-5', false)).toBe(true)
     expect(keepsCache({ family: 'fable', effort: 'low' }, 'claude-fable-5-1', false)).toBe(true)
+    expect(keepsCache({ family: 'fable', effort: 'low' }, 'claude-fable-5-2', false)).toBe(true)
+    expect(keepsCache({ family: 'fable', effort: 'low' }, 'claude-fable-5', false)).toBe(false)
     expect(keepsCache({ family: 'opus', effort: 'xhigh' }, 'claude-opus-5-5', true)).toBe(false)
     expect(keepsCache({ family: 'sonnet', effort: 'xhigh' }, 'claude-sonnet-5', false)).toBe(false)
     expect(keepsCache({ family: 'sonnet', effort: 'high' }, 'claude-opus-5-5', false)).toBe(false)
