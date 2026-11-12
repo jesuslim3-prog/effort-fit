@@ -1,0 +1,2 @@
+# Output of replay.mjs holds prompt excerpts from local transcripts; keep it out of the repo.
+*.json
