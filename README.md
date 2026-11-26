@@ -1,5 +1,8 @@
 # effort-fit
 
+> **실험 종료(2026-11).** 더 이상 유지하지 않으며 저장소는 보관(archive) 상태다.
+> *Discontinued (2026-11). No longer maintained; this repository is archived.*
+
 > **실험작(Experimental).** 개인 실험으로 만든 Claude Code 플러그인입니다. Claude Code 2.1.295(Windows)에서만 확인했고, 기반이 되는 플러그인 훅 API는 Claude Code 쪽에서 "early access"로 표시돼 있어 다음 버전에서 동작이 깨질 수 있습니다. 판정 기준은 소수의 시험 턴으로 정한 경험칙이며 검증된 지표가 아닙니다.
 >
 > *Experimental Claude Code plugin that shows whether the session's model and reasoning effort fit the current work. Tested only on Claude Code 2.1.295 (Windows); it relies on an early-access hooks API and may break on later versions.*
